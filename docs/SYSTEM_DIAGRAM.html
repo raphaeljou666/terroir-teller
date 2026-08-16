@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TerroirTeller — 系統與功能關聯圖</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;700;900&family=Noto+Sans+TC:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+<style>
+  :root{
+    --paper:#EEE9DD;
+    --paper-deep:#E4DDC9;
+    --ink:#241F1C;
+    --ink-soft:#5A544C;
+    --wine:#6E1E3D;
+    --wine-deep:#4A1429;
+    --gold:#AD8A54;
+    --gold-deep:#8A6B3A;
+    --sage:#55684F;
+    --alert:#A9382B;
+    --line: rgba(36,31,28,0.14);
+    --line-strong: rgba(36,31,28,0.28);
+    --card:#F7F4EC;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(110,30,61,0.06), transparent 60%),
+      radial-gradient(1000px 500px at 100% 0%, rgba(85,104,79,0.06), transparent 55%),
+      var(--paper);
+    color:var(--ink);
+    font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+    line-height:1.75;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{ background: rgba(173,138,84,0.35); }
+
+  a{ color:inherit; }
+
+  .mono{
+    font-family:"IBM Plex Mono", ui-monospace, monospace;
+    letter-spacing:0.02em;
+  }
+
+  /* ---------- sticky nav ---------- */
+  .nav{
+    position:sticky; top:0; z-index:50;
+    backdrop-filter: blur(10px);
+    background: rgba(238,233,221,0.86);
+    border-bottom:1px solid var(--line-strong);
+  }
+  .nav-inner{
+    max-width:1040px; margin:0 auto;
+    display:flex; align-items:center; gap:18px;
+    padding:14px 20px;
+  }
+  .nav-mark{
+    font-family:"Noto Serif TC",serif;
+    font-weight:900; font-size:16px;
+    white-space:nowrap;
+    display:flex; align-items:baseline; gap:6px;
+  }
+  .nav-mark small{
+    font-family:"Noto Sans TC",sans-serif;
+    font-weight:500; font-size:11px; color:var(--ink-soft);
+    letter-spacing:0.08em;
+  }
+  .nav-links{
+    display:flex; gap:4px; overflow-x:auto;
+    scrollbar-width:none; -ms-overflow-style:none;
+  }
+  .nav-links::-webkit-scrollbar{ display:none; }
+  .nav-links a{
+    flex:none;
+    text-decoration:none;
+    font-size:13px; font-weight:600;
+    color:var(--ink-soft);
+    padding:7px 12px;
+    border-radius:999px;
+    border:1px solid transparent;
+    white-space:nowrap;
+    transition:all .18s ease;
+  }
+  .nav-links a:hover{
+    color:var(--wine);
+    border-color:var(--line-strong);
+    background:rgba(255,255,255,0.5);
+  }
+
+  /* ---------- hero ---------- */
+  .hero{
+    max-width:1040px; margin:0 auto;
+    padding:64px 20px 40px;
+  }
+  .eyebrow{
+    display:inline-flex; align-items:center; gap:8px;
+    font-size:12px; font-weight:700;
+    letter-spacing:0.14em;
+    color:var(--wine);
+    text-transform:uppercase;
+    margin-bottom:18px;
+  }
+  .eyebrow::before{
+    content:"";
+    width:22px; height:1px;
+    background:var(--gold-deep);
+  }
+  h1.title{
+    font-family:"Noto Serif TC",serif;
+    font-weight:900;
+    font-size:clamp(30px, 5vw, 46px);
+    line-height:1.25;
+    margin:0 0 18px;
+    letter-spacing:0.01em;
+  }
+  h1.title em{
+    font-style:normal;
+    color:var(--wine);
+  }
+  .lede{
+    font-size:16px;
+    color:var(--ink-soft);
+    max-width:640px;
+    margin:0 0 36px;
+  }
+  .lede b{ color:var(--ink); font-weight:700;}
+
+  /* flight / reading order */
+  .flight{
+    display:flex; flex-wrap:wrap; gap:0;
+    border-top:1px solid var(--line-strong);
+    border-bottom:1px solid var(--line-strong);
+    padding:22px 0;
+  }
+  .flight a{
+    flex:1 1 150px;
+    text-decoration:none;
+    display:flex; align-items:center; gap:12px;
+    padding:8px 16px;
+    position:relative;
+  }
+  .flight a:not(:last-child)::after{
+    content:"";
+    position:absolute; right:0; top:50%; transform:translateY(-50%);
+    width:1px; height:60%;
+    background:var(--line);
+  }
+  .flight-num{
+    font-family:"IBM Plex Mono",monospace;
+    font-weight:600; font-size:13px;
+    color:var(--gold-deep);
+    border:1px solid var(--gold);
+    width:26px; height:26px;
+    border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    flex:none;
+    transition:all .18s ease;
+  }
+  .flight-label{
+    font-size:13px; font-weight:600; color:var(--ink-soft);
+    transition:color .18s ease;
+  }
+  .flight a:hover .flight-num{ background:var(--wine); border-color:var(--wine); color:#fff; }
+  .flight a:hover .flight-label{ color:var(--wine); }
+
+  /* ---------- sections ---------- */
+  main{ max-width:1040px; margin:0 auto; padding:10px 20px 40px; }
+
+  section.plate{
+    padding:56px 0;
+    border-bottom:1px solid var(--line);
+    scroll-margin-top:76px;
+  }
+  section.plate:last-of-type{ border-bottom:none; }
+
+  .plate-head{
+    display:flex; align-items:flex-start; gap:18px;
+    margin-bottom:20px;
+  }
+  .plate-num{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px; font-weight:600;
+    color:var(--gold-deep);
+    border:1px solid var(--gold);
+    padding:4px 9px;
+    border-radius:4px;
+    white-space:nowrap;
+    margin-top:6px;
+  }
+  h2.plate-title{
+    font-family:"Noto Serif TC",serif;
+    font-weight:700;
+    font-size:24px;
+    margin:0;
+  }
+  .plate-desc{
+    background:var(--card);
+    border-left:3px solid var(--gold);
+    padding:14px 18px;
+    border-radius:0 8px 8px 0;
+    font-size:14.5px;
+    color:var(--ink-soft);
+    margin:0 0 26px;
+  }
+  .plate-desc b{
+    color:var(--ink); font-weight:700;
+  }
+  .plate-desc .tag{
+    display:inline-block;
+    font-size:11px; font-weight:700;
+    color:var(--wine);
+    border:1px solid var(--wine);
+    border-radius:999px;
+    padding:1px 8px;
+    margin-right:8px;
+    letter-spacing:0.04em;
+  }
+
+  /* diagram frame — signature element: survey-plate corners */
+  .frame{
+    position:relative;
+    background:var(--card);
+    border:1px solid var(--line-strong);
+    border-radius:10px;
+    padding:28px 20px 20px;
+    overflow-x:auto;
+    margin-bottom:22px;
+  }
+  .corner{
+    position:absolute;
+    width:16px; height:16px;
+    pointer-events:none;
+  }
+  .corner::before, .corner::after{
+    content:"";
+    position:absolute;
+    background:var(--gold-deep);
+  }
+  .corner-tl{ top:8px; left:8px; }
+  .corner-tr{ top:8px; right:8px; }
+  .corner-bl{ bottom:8px; left:8px; }
+  .corner-br{ bottom:8px; right:8px; }
+  .corner-tl::before, .corner-bl::before{ width:2px; height:14px; left:0; }
+  .corner-tl::after, .corner-tr::after{ height:2px; width:14px; top:0; }
+  .corner-tr::before, .corner-br::before{ width:2px; height:14px; right:0; }
+  .corner-bl::after, .corner-br::after{ height:2px; width:14px; bottom:0; }
+  .frame-label{
+    position:absolute; top:8px; right:36px;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:10px; color:var(--ink-soft);
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+  }
+  .mermaid{
+    display:flex; justify-content:center;
+    min-width:560px;
+  }
+
+  /* note lists */
+  .notes{
+    background:transparent;
+    border:1px dashed var(--line-strong);
+    border-radius:10px;
+    padding:18px 20px;
+    margin:0 0 8px;
+  }
+  .notes-title{
+    font-size:12px; font-weight:700;
+    letter-spacing:0.06em;
+    color:var(--sage);
+    text-transform:uppercase;
+    margin:0 0 10px;
+  }
+  .notes ul{ margin:0; padding-left:0; list-style:none; }
+  .notes li{
+    position:relative;
+    padding-left:20px;
+    margin-bottom:8px;
+    font-size:14px;
+    color:var(--ink-soft);
+  }
+  .notes li:last-child{ margin-bottom:0; }
+  .notes li::before{
+    content:"—";
+    position:absolute; left:0; top:0;
+    color:var(--sage);
+    font-weight:700;
+  }
+  .notes li b{ color:var(--ink); font-weight:700; }
+  .notes code{
+    background:var(--paper-deep);
+    border-radius:4px;
+    padding:1px 6px;
+    font-size:12.5px;
+    font-family:"IBM Plex Mono",monospace;
+  }
+
+  /* alert / stamp callout */
+  .stamp{
+    position:relative;
+    background:linear-gradient(0deg, rgba(169,56,43,0.05), rgba(169,56,43,0.05)), var(--card);
+    border:1px solid var(--alert);
+    border-radius:10px;
+    padding:22px 22px 20px 26px;
+    margin:26px 0;
+  }
+  .stamp::before{
+    content:"⚠";
+    position:absolute; top:-14px; left:22px;
+    width:30px; height:30px;
+    background:var(--alert);
+    color:#fff;
+    border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:15px;
+    box-shadow:0 2px 6px rgba(0,0,0,0.25);
+  }
+  .stamp-title{
+    font-family:"Noto Serif TC",serif;
+    font-weight:700;
+    font-size:16.5px;
+    color:var(--alert);
+    margin:6px 0 12px;
+  }
+  .stamp p{
+    font-size:14px; color:var(--ink-soft);
+    margin:0 0 10px;
+  }
+  .stamp p:last-child{ margin-bottom:0; }
+  .stamp b{ color:var(--ink); }
+  .stamp .cmd{
+    display:block;
+    background:var(--ink);
+    color:#F4EFE2;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px;
+    padding:10px 14px;
+    border-radius:6px;
+    margin:6px 0 12px;
+    overflow-x:auto;
+    white-space:pre;
+  }
+
+  /* steps list (PR flow) */
+  .steps{
+    counter-reset:step;
+    display:grid; gap:10px;
+    margin:0 0 8px;
+  }
+  .steps li{
+    list-style:none;
+    display:flex; gap:14px; align-items:flex-start;
+    font-size:14px; color:var(--ink-soft);
+  }
+  .steps li::before{
+    counter-increment:step;
+    content:counter(step);
+    font-family:"IBM Plex Mono",monospace;
+    font-weight:600; font-size:12px;
+    color:var(--wine);
+    border:1px solid var(--wine);
+    width:22px; height:22px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    flex:none;
+  }
+  .steps li b{ color:var(--ink); }
+
+  .grid-2{
+    display:grid; grid-template-columns:1fr 1fr; gap:18px;
+  }
+  @media (max-width:720px){
+    .grid-2{ grid-template-columns:1fr; }
+  }
+
+  /* appendix table */
+  .ledger{
+    width:100%;
+    border-collapse:collapse;
+    font-size:14px;
+  }
+  .ledger th{
+    text-align:left;
+    font-size:11px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--ink-soft);
+    padding:0 0 10px;
+    border-bottom:1px solid var(--line-strong);
+    font-weight:700;
+  }
+  .ledger td{
+    padding:12px 0;
+    border-bottom:1px solid var(--line);
+    vertical-align:top;
+  }
+  .ledger tr:last-child td{ border-bottom:none; }
+  .ledger td:first-child{ color:var(--ink-soft); width:46%; }
+  .ledger td b, .ledger td code{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:13px;
+    color:var(--wine-deep);
+    background:var(--paper-deep);
+    padding:2px 7px;
+    border-radius:4px;
+  }
+
+  footer{
+    max-width:1040px; margin:0 auto;
+    padding:30px 20px 60px;
+    display:flex; justify-content:space-between; align-items:center;
+    flex-wrap:wrap; gap:10px;
+    font-size:12px; color:var(--ink-soft);
+    letter-spacing:0.02em;
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-mark">🍇 TerroirTeller <small>SYSTEM&nbsp;DIAGRAM</small></div>
+    <div class="nav-links">
+      <a href="#p1">圖一・架構</a>
+      <a href="#p2">圖二・資料流</a>
+      <a href="#p3">圖三・依賴</a>
+      <a href="#p4">圖四・範圍</a>
+      <a href="#p5">圖五・分支</a>
+      <a href="#appendix">附錄</a>
+    </div>
+  </div>
+</nav>
+
+<div class="hero">
+  <div class="eyebrow">SYSTEM_DIAGRAM · 系統與功能關聯圖</div>
+  <h1 class="title">酒標背後的那場<em>氣候推論</em>，<br/>拆成五張看得懂的圖。</h1>
+  <p class="lede">這份圖集用視覺化方式呈現整個 TerroirTeller 專案的元件、資料流、開發依賴與 MVP 範圍。<b>動工前先看一遍、卡關時回來對照、展示時直接秀給面試官看。</b></p>
+
+  <div class="flight">
+    <a href="#p1"><span class="flight-num">01</span><span class="flight-label">系統架構</span></a>
+    <a href="#p2"><span class="flight-num">02</span><span class="flight-label">資料流</span></a>
+    <a href="#p3"><span class="flight-num">03</span><span class="flight-label">開發依賴</span></a>
+    <a href="#p4"><span class="flight-num">04</span><span class="flight-label">MVP 範圍</span></a>
+    <a href="#p5"><span class="flight-num">05</span><span class="flight-label">Git 分支</span></a>
+  </div>
+</div>
+
+<main>
+
+  <!-- 圖一 -->
+  <section class="plate" id="p1">
+    <div class="plate-head">
+      <span class="plate-num">圖 01</span>
+      <h2 class="plate-title">系統架構（元件層級）</h2>
+    </div>
+    <p class="plate-desc"><span class="tag">白話</span>這張圖顯示「一個請求進來，會經過哪些層、每一層做什麼」。分層的好處是換掉某一層不影響其他層——例如把 Streamlit 換成 React，只要 API 不變，下面都不用動。</p>
+
+    <div class="frame">
+      <span class="frame-label">Component Layers</span>
+      <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+      <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+      <div class="mermaid">
+graph TB
+    subgraph UI["🖥️ 介面層 Streamlit"]
+        A["app.py<br/>上傳酒標／呈現報告"]
+    end
+
+    subgraph AGENT["🤖 Agent 編排層"]
+        B["agent.py<br/>Agent Orchestrator<br/>決定呼叫哪個 Tool"]
+    end
+
+    subgraph TOOLS["🔧 Tools 層 src/"]
+        C1["vision.py<br/>酒標辨識"]
+        C2["climate.py<br/>氣候查詢與計算"]
+        C3["retrieval.py<br/>知識檢索"]
+        C4["report.py<br/>報告生成"]
+    end
+
+    subgraph DATA["💾 資料層"]
+        D1[("regions.json<br/>產區座標表")]
+        D2[("Chroma<br/>向量資料庫")]
+        D3[("cache／<br/>氣候基準線快取")]
+    end
+
+    subgraph EXT["☁️ 外部服務"]
+        E1["OpenAI API<br/>GPT-4o-mini + Vision + Embedding"]
+        E2["Open-Meteo API<br/>歷史氣候資料"]
+    end
+
+    A --> B
+    B --> C1
+    B --> C2
+    B --> C3
+    B --> C4
+    C1 --> E1
+    C2 --> D1
+    C2 --> E2
+    C2 --> D3
+    C3 --> D2
+    C3 --> E1
+    C4 --> E1
+
+    style UI fill:#E7ECDF,stroke:#55684F,stroke-width:1.4px,color:#241F1C
+    style AGENT fill:#F3E6C8,stroke:#8A6B3A,stroke-width:1.4px,color:#241F1C
+    style TOOLS fill:#F1DEE6,stroke:#6E1E3D,stroke-width:1.4px,color:#241F1C
+    style DATA fill:#E4DDC9,stroke:#8A6B3A,stroke-width:1.4px,color:#241F1C
+    style EXT fill:#E3E5E1,stroke:#5A544C,stroke-width:1.4px,color:#241F1C
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="notes-title">關鍵設計原則</div>
+      <ul>
+        <li><b>UI 只跟 Agent 溝通</b>，不直接碰 Tools 或外部 API</li>
+        <li><b>Agent 是唯一的「大腦」</b>，Tools 只做被交辦的事</li>
+        <li><b>快取層獨立於 API 呼叫層</b>，未來換 API 也不影響快取邏輯</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 圖二 -->
+  <section class="plate" id="p2">
+    <div class="plate-head">
+      <span class="plate-num">圖 02</span>
+      <h2 class="plate-title">資料流（使用者完整流程）</h2>
+    </div>
+    <p class="plate-desc"><span class="tag">白話</span>從「使用者按下上傳」到「看見報告」，資料是怎麼流動的。這張圖是實作時最常參考的——每個箭頭都對應一段程式碼。</p>
+
+    <div class="frame">
+      <span class="frame-label">End-to-End Flow</span>
+      <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+      <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+      <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as 👤 使用者
+    participant UI as 🖥️ Streamlit UI
+    participant AG as 🤖 Agent
+    participant V as 🔧 Vision Tool
+    participant C as 🔧 Climate Tool
+    participant R as 🔧 Retrieval Tool
+    participant REP as 🔧 Report Tool
+    participant OM as ☁️ Open-Meteo
+    participant OA as ☁️ OpenAI
+
+    U->>UI: 上傳酒標照片
+    UI->>V: 辨識酒標
+    V->>OA: 呼叫 Vision API
+    OA-->>V: 回傳 JSON（產區／年份／品種）
+    V-->>UI: 結構化結果
+    UI->>U: 顯示辨識結果讓使用者確認
+    U->>UI: 確認／修正後送出
+
+    UI->>AG: 啟動分析流程
+    AG->>C: 呼叫氣候工具
+
+    Note over C: 查產區座標
+    C->>C: 讀 regions.json
+    C->>OM: 抓該年生長季氣候
+    OM-->>C: 每日溫度／降雨
+    C->>C: 讀基準線快取<br/>算 GDD 與距平
+    C-->>AG: 氣候距平結果
+
+    AG->>R: 檢索對應知識
+    R->>OA: 查詢向量化
+    OA-->>R: 查詢向量
+    R->>R: Chroma 相似度檢索
+    R-->>AG: Top-3 知識片段
+
+    AG->>REP: 生成報告
+    REP->>OA: 組合 prompt 呼叫 GPT
+    OA-->>REP: 風味推測報告
+    REP-->>AG: Markdown 報告
+    AG-->>UI: 完整結果
+
+    UI->>U: 呈現報告＋氣候圖表
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="notes-title">時間預算 · 對應 PRD 成功指標「≤ 15 秒」</div>
+      <ul>
+        <li>Vision 辨識：<code>3–5 秒</code></li>
+        <li>氣候 API：<code>1–2 秒</code></li>
+        <li>RAG 檢索：<code>&lt; 1 秒</code></li>
+        <li>報告生成：<code>5–8 秒</code></li>
+        <li><b>總計：約 10–15 秒</b></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 圖三 -->
+  <section class="plate" id="p3">
+    <div class="plate-head">
+      <span class="plate-num">圖 03</span>
+      <h2 class="plate-title">開發依賴關係（動工順序）</h2>
+    </div>
+    <p class="plate-desc"><span class="tag">白話</span>這張圖告訴你「哪個要先做才能做下一個」。跟著箭頭走，就不會發生「做到一半發現前面沒做無法繼續」的窘境。</p>
+
+    <div class="frame">
+      <span class="frame-label">7-Day Dependency</span>
+      <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+      <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+      <div class="mermaid">
+graph TB
+    subgraph D1["📅 Day 1｜資料層打底"]
+        direction LR
+        T1["環境設定<br/>T-01~T-03"]
+        T4["產區座標表<br/>T-04"]
+        T5["知識庫初稿<br/>T-05"]
+    end
+
+    subgraph D2["📅 Day 2｜氣候 API"]
+        direction LR
+        T6["Open-Meteo 呼叫<br/>T-06"]
+        T8["基準線快取<br/>T-08"]
+    end
+
+    subgraph D3["📅 Day 3｜距平 + RAG"]
+        direction LR
+        T7["GDD 距平計算<br/>T-07"]
+        T9["Chroma 向量庫<br/>T-09"]
+    end
+
+    subgraph D4["📅 Day 4｜Vision + Tools"]
+        direction LR
+        T10["Vision 辨識<br/>T-10"]
+        T11["Tools Schema<br/>T-11"]
+    end
+
+    subgraph D5["🚨 Day 5｜Agent 整合（關鍵里程碑）"]
+        direction LR
+        T12["⭐ Agent Orchestrator<br/>T-12"]
+        T13["報告生成 Prompt<br/>T-13"]
+    end
+
+    subgraph D6["📅 Day 6｜介面"]
+        direction LR
+        T14["Streamlit 介面<br/>T-14"]
+        T15["氣候圖表<br/>T-15"]
+    end
+
+    subgraph D7["📅 Day 7｜驗證與交付"]
+        direction LR
+        T16["驗證測試<br/>T-16"]
+        T20["README + Demo<br/>T-20"]
+    end
+
+    D1 --> D2
+    D2 --> D3
+    D3 --> D4
+    D4 --> D5
+    D5 --> D6
+    D6 --> D7
+
+    T1 --> T6
+    T1 --> T10
+    T4 --> T6
+    T5 --> T9
+    T6 --> T8
+    T6 --> T7
+    T7 --> T12
+    T9 --> T12
+    T10 --> T11
+    T11 --> T12
+    T12 --> T13
+    T13 --> T14
+    T14 --> T15
+    T14 --> T16
+    T16 --> T20
+
+    style D1 fill:#F7F4EC,stroke:#AD8A54,stroke-width:1px
+    style D2 fill:#F7F4EC,stroke:#AD8A54,stroke-width:1px
+    style D3 fill:#F7F4EC,stroke:#AD8A54,stroke-width:1px
+    style D4 fill:#F7F4EC,stroke:#AD8A54,stroke-width:1px
+    style D5 fill:#F1DEDA,stroke:#A9382B,stroke-width:2.6px,color:#241F1C
+    style D6 fill:#F7F4EC,stroke:#AD8A54,stroke-width:1px
+    style D7 fill:#F7F4EC,stroke:#AD8A54,stroke-width:1px
+    style T12 fill:#F3E6C8,stroke:#A9382B,stroke-width:2.4px,color:#241F1C
+      </div>
+    </div>
+
+    <div class="stamp">
+      <div class="stamp-title">關鍵節點警告：Day 5 是專案生死線</div>
+      <p><b>為什麼 Day 5 這麼重要？</b> T-12（Agent Orchestrator）是整個專案的匯流點——前四天所有準備工作（氣候 API、RAG、Vision、Tools Schema）都要在這天串聯成一個能自主運作的 Agent。如果 Agent 串不通，前四天的努力都無法對外展示。</p>
+      <p><b>當日底線：</b>一定要達成端到端可執行——</p>
+      <span class="cmd">python agent.py --region Bordeaux --year 2019</span>
+      <p>能印出完整風味推測報告，即使 UI 還沒做。</p>
+      <p><b>卡住怎麼辦：</b>立刻退回「非 Agent」寫法——用 Python 直接串接呼叫（if/else 決定要呼叫哪個工具），先讓端到端跑通。Agent 是加分項，能跑才是底線。</p>
+    </div>
+
+    <div class="frame" style="margin-top:30px;">
+      <span class="frame-label">Day 5 Close-up</span>
+      <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+      <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+      <div class="mermaid">
+graph LR
+    subgraph PREV["前四天累積產出"]
+        A["Day 2–3<br/>氣候距平計算"]
+        B["Day 3<br/>Chroma 向量庫"]
+        C["Day 4<br/>Vision 辨識"]
+        D["Day 4<br/>Tools Schema"]
+    end
+
+    subgraph DAY5["🚨 Day 5 匯流點"]
+        E["⭐ T-12<br/>Agent Orchestrator<br/>整合所有 Tools"]
+        F["T-13<br/>報告生成 Prompt"]
+    end
+
+    subgraph NEXT["Day 6 之後才有機會"]
+        G["Day 6<br/>Streamlit UI"]
+        H["Day 7<br/>驗證測試"]
+    end
+
+    A --> E
+    B --> E
+    C --> E
+    D --> E
+    E --> F
+    F --> G
+    F --> H
+
+    style PREV fill:#E7ECDF,stroke:#55684F,stroke-width:1px
+    style DAY5 fill:#F1DEDA,stroke:#A9382B,stroke-width:2.4px
+    style NEXT fill:#F3E6C8,stroke:#8A6B3A,stroke-width:1px
+    style E fill:#F3E6C8,stroke:#A9382B,stroke-width:2.6px
+      </div>
+    </div>
+    <p style="font-size:13px;color:var(--ink-soft);margin-top:10px;"><span class="tag" style="margin-right:8px;">白話</span>把 Day 5 拉出來單獨看：前四天的所有產出如何在這一天匯合成一個能跑的 Agent。</p>
+  </section>
+
+  <!-- 圖四 -->
+  <section class="plate" id="p4">
+    <div class="plate-head">
+      <span class="plate-num">圖 04</span>
+      <h2 class="plate-title">MVP 範圍界定</h2>
+    </div>
+    <p class="plate-desc"><span class="tag">白話</span>這張圖告訴你「這個 side project 一週內要做的部分（MVP）vs 未來延伸」。任何超出 MVP 的想法一律進 P2 冷凍區，保護主線進度。</p>
+
+    <div class="frame">
+      <span class="frame-label">Scope Boundary</span>
+      <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+      <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+      <div class="mermaid">
+graph TB
+    subgraph MVP["✅ MVP 範圍（7 天必做）"]
+        M1["酒標拍照上傳"]
+        M2["Vision 自動辨識"]
+        M3["手動修正 fallback"]
+        M4["氣候資料抓取"]
+        M5["GDD 距平計算"]
+        M6["RAG 知識檢索"]
+        M7["風味推測報告"]
+        M8["氣候距平視覺化"]
+    end
+
+    subgraph P1["🟡 P1 加分（有時間再做）"]
+        P1_1["知名年份驗證測試"]
+        P1_2["報告匯出 Markdown"]
+        P1_3["錯誤處理優化"]
+        P1_4["Streamlit Cloud 部署"]
+    end
+
+    subgraph P2["🔵 P2 未來延伸（本次不做）"]
+        P2_1["清酒／啤酒／烈酒支援"]
+        P2_2["使用者收藏與歷史"]
+        P2_3["餐酒配對建議"]
+        P2_4["即時通路庫存"]
+        P2_5["百萬酒款資料庫"]
+        P2_6["行動裝置原生 App"]
+    end
+
+    MVP -.->|完成後| P1
+    P1 -.->|下一輪| P2
+
+    style MVP fill:#E7ECDF,stroke:#55684F,stroke-width:1.6px
+    style P1 fill:#F3E6C8,stroke:#8A6B3A,stroke-width:1.6px
+    style P2 fill:#E3E5E1,stroke:#5A544C,stroke-width:1.6px
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="notes-title">範圍防蔓延原則</div>
+      <ul>
+        <li>開發時想到新功能 → 寫進 <code>04_Backlog.md</code> P2 區，不當場做</li>
+        <li>使用者反饋（自測時）想改的 → 先分辨是 bug 還是新需求，bug 才改</li>
+        <li><b>「順便加一下」是專案殺手，警戒！</b></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 圖五 -->
+  <section class="plate" id="p5">
+    <div class="plate-head">
+      <span class="plate-num">圖 05</span>
+      <h2 class="plate-title">Git 分支與 PR 流程</h2>
+    </div>
+    <p class="plate-desc"><span class="tag">白話</span>這張圖告訴你「未來每次開發新功能，Git 上要怎麼操作」。這個流程是業界標準 GitHub Flow。</p>
+
+    <div class="frame">
+      <span class="frame-label">Branching Flow</span>
+      <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+      <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+      <div class="mermaid">
+gitGraph
+    commit id: "初始化專案"
+    commit id: "加入 docs"
+    commit id: "加入 CLAUDE.md"
+    branch feature/T-06-open-meteo
+    checkout feature/T-06-open-meteo
+    commit id: "feat: 加入氣候 API"
+    commit id: "test: 加入氣候測試"
+    checkout main
+    merge feature/T-06-open-meteo tag: "PR #1"
+    branch feature/T-09-chroma
+    checkout feature/T-09-chroma
+    commit id: "feat: 建立向量資料庫"
+    checkout main
+    merge feature/T-09-chroma tag: "PR #2"
+    branch feature/T-12-agent
+    checkout feature/T-12-agent
+    commit id: "feat: Agent orchestrator"
+    commit id: "fix: 修正 tool routing"
+    checkout main
+    merge feature/T-12-agent tag: "PR #3"
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="notes">
+        <div class="notes-title">分支命名規則</div>
+        <ul>
+          <li><code>feature/&lt;Backlog-ID&gt;-&lt;簡短描述&gt;</code></li>
+          <li>範例：<code>feature/T-06-open-meteo-api</code></li>
+          <li>範例：<code>feature/T-12-agent-orchestrator</code></li>
+          <li>範例：<code>fix/T-14-mobile-camera-bug</code></li>
+        </ul>
+      </div>
+      <div class="notes">
+        <div class="notes-title">PR 流程</div>
+        <ol class="steps">
+          <li>從 main 拉新分支開發</li>
+          <li>完成後 push 到 GitHub</li>
+          <li>開 PR（Pull Request）回 main</li>
+          <li><b>自己 review 一次</b>（重要！當自己的 reviewer）</li>
+          <li>Merge 後刪除 feature 分支</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- 附錄 -->
+  <section class="plate" id="appendix" style="padding-bottom:20px;">
+    <div class="plate-head">
+      <span class="plate-num">附錄</span>
+      <h2 class="plate-title">對照文件索引</h2>
+    </div>
+    <table class="ledger">
+      <thead><tr><th>想確認什麼？</th><th>看哪份文件</th></tr></thead>
+      <tbody>
+        <tr><td>產品要做什麼</td><td><b>01_PRD.md</b></td></tr>
+        <tr><td>給誰用</td><td><b>02_Persona.md</b></td></tr>
+        <tr><td>怎麼用</td><td><b>03_UserStory.md</b></td></tr>
+        <tr><td>開發任務清單</td><td><b>04_Backlog.md</b></td></tr>
+        <tr><td>每天做什麼</td><td><b>05_Roadmap.md</b></td></tr>
+        <tr><td>技術怎麼裝</td><td><b>06_TechSetup.md</b></td></tr>
+        <tr><td>開發時遵守什麼規則</td><td><b>CLAUDE.md</b>（根目錄）</td></tr>
+        <tr><td>整個系統長怎樣（本檔）</td><td><b>SYSTEM_DIAGRAM.md</b></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+</main>
+
+<footer>
+  <span>TerroirTeller · Side Project Documentation</span>
+  <span class="mono">v1.0 · 2026</span>
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    securityLevel: 'loose',
+    fontFamily: '"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif',
+    themeVariables: {
+      background: 'transparent',
+      primaryColor: '#F3E6C8',
+      primaryTextColor: '#241F1C',
+      primaryBorderColor: '#AD8A54',
+      lineColor: '#6E1E3D',
+      secondaryColor: '#E7ECDF',
+      secondaryBorderColor: '#55684F',
+      secondaryTextColor: '#241F1C',
+      tertiaryColor: '#F1DEE6',
+      tertiaryBorderColor: '#6E1E3D',
+      tertiaryTextColor: '#241F1C',
+      fontSize: '14.5px',
+
+      actorBkg: '#F3E6C8',
+      actorBorder: '#AD8A54',
+      actorTextColor: '#241F1C',
+      actorLineColor: '#AD8A54',
+      signalColor: '#6E1E3D',
+      signalTextColor: '#241F1C',
+      labelBoxBkgColor: '#E7ECDF',
+      labelBoxBorderColor: '#55684F',
+      labelTextColor: '#241F1C',
+      loopTextColor: '#241F1C',
+      noteBkgColor: '#F1DEE6',
+      noteBorderColor: '#6E1E3D',
+      noteTextColor: '#241F1C',
+      activationBorderColor: '#AD8A54',
+      activationBkgColor: '#F3E6C8',
+      sequenceNumberColor: '#F7F4EC',
+
+      git0: '#6E1E3D',
+      git1: '#AD8A54',
+      git2: '#55684F',
+      git3: '#8a3b57',
+      gitBranchLabel0: '#F7F4EC',
+      gitBranchLabel1: '#241F1C',
+      gitBranchLabel2: '#F7F4EC',
+      commitLabelColor: '#241F1C',
+      commitLabelBackground: '#EEE9DD',
+      tagLabelBackground: '#AD8A54',
+      tagLabelColor: '#241F1C',
+      tagLabelBorder: '#6E1E3D'
+    }
+  });
+</script>
+
+</body>
+</html>
