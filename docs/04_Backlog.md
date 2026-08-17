@@ -40,9 +40,9 @@
 | ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
 |---|---|---|---|---|---|
 | T-06 | 實作 Open-Meteo API 呼叫函式 | ✅ 完成 | 2h | T-02 | `src/climate.py` 的 `fetch_season_climate()`，依 `hemisphere` 判斷生長季，回傳 `SeasonClimate`（含 to_dataframe）。CLI：`python -m src.climate --region "Bordeaux" --year 2019` |
-| T-07 | 實作 GDD 與距平計算函式 | | 3h | T-06 | 輸入氣候資料，輸出 GDD 值與距平百分比 |
+| T-07 | 實作 GDD 與距平計算函式 | ✅ 完成 | 3h | T-06 | 輸入氣候資料，輸出 GDD 值與距平百分比 |
 | T-08 | 抓 30 年基準線氣候資料並快取 | ✅ 完成 | 2h | T-06 | `get_baseline()` 抓 1991–2020 共 30 季存成 `data/cache/{產區}_baseline_1991_2020.json`，第二次查詢不再打 API。`--warm-cache-all` 可一次預熱 20 產區 |
-| T-09 | 建立 Chroma 向量資料庫、匯入知識 | | 2h | T-05 | 可用 `chromadb.query()` 檢索到相關知識 |
+| T-09 | 建立 Chroma 向量資料庫、匯入知識 | ✅ 完成 | 2h | T-05 | 可用 `chromadb.query()` 檢索到相關知識 |
 | T-10 | 實作 GPT-4o-mini Vision 酒標辨識函式 | | 3h | T-02 | 輸入圖片路徑，輸出結構化 JSON |
 
 > **T-06／T-08 實作備註**
@@ -52,6 +52,15 @@
 > - 抓資料時發現 Mendoza 原座標 `-33.65, -69.35` 落在 ERA5 海拔 1725m 的安地斯山網格，2019 生長季算出 13.1°C／1793mm，與當地半沙漠氣候差很遠。已改為 Uco Valley 的 `-33.58, -69.10`（925m），修正後為 18.8°C／288mm。
 > - Open-Meteo 免費方案的每小時額度大約只夠抓 13–14 個產區的基準線，`--warm-cache-all` 要分兩次跑。429 分兩種：每分鐘上限等 65 秒可解，每小時／每日上限會直接停手不硬重試。
 > - ERA5 在山區會高估降雨（Barolo、Central Otago、Marlborough 都約為實測值的兩倍），這是 25km 網格的先天限制，移動座標救不了。T-13 報告與 T-20 README 要寫進方法論限制，見 README「氣候資料的來源與限制」。
+
+> **T-07／T-09 實作備註**
+>
+> - 距平的標準差採母體標準差（`ddof=0`），是 WMO 30 年氣候常態期的慣例算法：30 年視為該常態期的完整母體，不是抽樣估計。跟 pandas 的預設 `ddof=1` 不同，需明確指定。
+> - GDD 必須逐年算完再取平均，不能先把 30 年的日溫平均起來再算——`max(t - 10, 0)` 的截斷運算不能跟平均互換順序，先平均會讓冷涼產區的 GDD 被低估得更嚴重。
+> - 缺值天數不設排除門檻：某一年即使缺值天數偏多，仍照樣用剩下的有效天數計算，只在輸出中標註缺了幾天（`missing_day_count`），不整年排除、不補值。
+> - 「採收前 30 天降雨」沒有真實採收日資料，用生長季結束日往前推 30 天當代理指標，輸出明確標註「非實際採收日」。
+> - 知識庫檔案本身沒有 `layer` frontmatter 欄位（跟原規劃不同），匯入時依檔案所在資料夾（`climate_rules/` 或 `regions/`）合成這個欄位，不是讀出來的。
+> - 踩到一個 chromadb 1.x 的雷：`get_collection()`／`get_or_create_collection()` 若不明確傳入 `embedding_function`，會悄悄退回內建的本地模型，導致查詢向量跟寫入向量不同空間、檢索結果錯誤但不會報錯。`src/retrieval.py` 所有 collection 存取一律走同一個內部 helper 帶入同一組 embedding function，避免踩到。
 
 ### Agent 主流程
 
@@ -106,6 +115,7 @@
 - 部署到雲端（Streamlit Community Cloud）
 - 支援多語言介面
 - 進階 tool：對比同產區多年氣候趨勢
+- Huglin 指數（Huglin Index）作為 GDD 之外的補充積溫指標
 
 ---
 
