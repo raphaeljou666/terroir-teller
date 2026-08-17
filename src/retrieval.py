@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,12 @@ CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"
 COLLECTION_NAME = "terroir_knowledge"
 EMBEDDING_MODEL = "text-embedding-3-small"
 FRONTMATTER_DELIMITER = "---"
+
+# 新申請、額度較低的 OpenAI 帳號 TPM（每分鐘 token 數）上限可能只有 40000，全量 98 則
+# 知識庫一次送出會超過限制，因此拆成小批次呼叫 embeddings API。
+EMBEDDING_BATCH_SIZE = 20
+EMBEDDING_RATE_LIMIT_WAIT_SECONDS = 20.0
+EMBEDDING_MAX_RETRIES = 3
 
 USER_MESSAGE_NO_API_KEY = "系統尚未設定 OpenAI API Key，請聯絡開發者。"
 USER_MESSAGE_INGEST_FAILED = "知識庫匯入暫時無法使用，請稍後再試一次。"
@@ -207,10 +214,13 @@ def _get_embedding_function() -> embedding_functions.OpenAIEmbeddingFunction:
         RetrievalError: 環境變數 `OPENAI_API_KEY` 未設定。
     """
     load_dotenv()
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    if not os.environ.get("OPENAI_API_KEY"):
         raise RetrievalError(USER_MESSAGE_NO_API_KEY, "環境變數 OPENAI_API_KEY 未設定")
-    return embedding_functions.OpenAIEmbeddingFunction(api_key=api_key, model_name=EMBEDDING_MODEL)
+    # 用 api_key_env_var 而非直接傳 api_key：後者不會被 chromadb 持久化保存，換行程重建
+    # collection 時讀不到原本用的 key（見官方 DeprecationWarning）。
+    return embedding_functions.OpenAIEmbeddingFunction(
+        api_key_env_var="OPENAI_API_KEY", model_name=EMBEDDING_MODEL
+    )
 
 
 def _get_client() -> chromadb.ClientAPI:
@@ -256,19 +266,51 @@ def ingest_knowledge_base(sample_only: bool = False, reset: bool = False) -> int
     collection = _get_collection(client)
     documents = load_documents(sample_only)
 
-    try:
-        # upsert 而非 add：重跑 ingest（例如改了某個知識檔）不會因為 id 已存在而失敗。
-        collection.upsert(
-            ids=[doc["id"] for doc in documents],
-            documents=[doc["document"] for doc in documents],
-            metadatas=[doc["metadata"] for doc in documents],
-        )
-    except (openai.OpenAIError, chromadb.errors.ChromaError) as exc:
-        logger.error("知識庫匯入失敗：%s", exc, exc_info=True)
-        raise RetrievalError(USER_MESSAGE_INGEST_FAILED, f"collection.upsert() 失敗：{exc!r}") from exc
+    for start in range(0, len(documents), EMBEDDING_BATCH_SIZE):
+        _upsert_batch(collection, documents[start : start + EMBEDDING_BATCH_SIZE])
 
     logger.info("匯入完成：%d 筆（sample_only=%s, reset=%s）", len(documents), sample_only, reset)
     return len(documents)
+
+
+def _upsert_batch(collection: chromadb.Collection, batch: list[dict[str, Any]]) -> None:
+    """把一批文件寫入 collection，遇到 embedding API 的速率限制時等待重試。
+
+    upsert 而非 add：重跑 ingest（例如改了某個知識檔）不會因為 id 已存在而失敗。批次大小
+    受 `EMBEDDING_BATCH_SIZE` 限制——新申請、額度較低的帳號 TPM 上限偏低，一次把全部 98
+    則塞進同一個 embeddings 請求會超過限制；踩到限制時等一下重試，而不是直接放棄整個匯入。
+
+    Args:
+        collection: 目標 Chroma collection。
+        batch: 這一批要寫入的文件（`load_documents()` 回傳格式的子集）。
+
+    Raises:
+        RetrievalError: 重試次數用盡仍遇到速率限制，或遇到其他 embedding／Chroma 錯誤。
+    """
+    for attempt in range(1, EMBEDDING_MAX_RETRIES + 1):
+        try:
+            collection.upsert(
+                ids=[doc["id"] for doc in batch],
+                documents=[doc["document"] for doc in batch],
+                metadatas=[doc["metadata"] for doc in batch],
+            )
+            return
+        except openai.RateLimitError as exc:
+            if attempt == EMBEDDING_MAX_RETRIES:
+                raise RetrievalError(
+                    USER_MESSAGE_INGEST_FAILED,
+                    f"embedding 速率限制重試 {attempt} 次後仍失敗：{exc!r}",
+                ) from exc
+            logger.warning(
+                "embedding 速率限制，%.0f 秒後重試（第 %d/%d 次）：%s",
+                EMBEDDING_RATE_LIMIT_WAIT_SECONDS, attempt, EMBEDDING_MAX_RETRIES, exc,
+            )
+            time.sleep(EMBEDDING_RATE_LIMIT_WAIT_SECONDS)
+        except (openai.OpenAIError, chromadb.errors.ChromaError) as exc:
+            logger.error("知識庫匯入失敗：%s", exc, exc_info=True)
+            raise RetrievalError(
+                USER_MESSAGE_INGEST_FAILED, f"collection.upsert() 失敗：{exc!r}"
+            ) from exc
 
 
 # --- 查詢 ----------------------------------------------------------------------
