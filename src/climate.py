@@ -1,8 +1,9 @@
-"""Open-Meteo 歷史氣候資料存取與 30 年基準線快取。
+"""Open-Meteo 歷史氣候資料存取、30 年基準線快取，以及 GDD／距平計算。
 
 對應 Backlog 任務：
 
 * **T-06**：依產區名稱與年份取得該年生長季的每日氣候資料。
+* **T-07**：以 30 年基準線為對照，計算 GDD 與降雨的距平（百分比與 z-score 並列）。
 * **T-08**：抓取 1991–2020 的 30 年基準線並快取到 `data/cache/`，之後不重複打 API。
 
 時區說明（對應 CLAUDE.md 條款 29）：Open-Meteo Archive API 的每日彙總一律以 **UTC 曆日**
@@ -74,11 +75,20 @@ WARM_CACHE_DELAY_SECONDS = 10.0
 # ERA5 重分析資料約有 5 天延遲，接近今天的日期抓不到。
 ARCHIVE_LAG_DAYS = 6
 
+# GDD（生長積溫）的基礎溫度，業界慣例採 10°C，超過的部分才累加。
+GDD_BASE_TEMP_C = 10.0
+
+# 「採收前降雨」用生長季結束日往前推這麼多天當代理指標。本專案沒有真實採收日資料，
+# 這只是粗略代理值，不同品種、產區、年份的實際採收時間點不一樣（見條款 15 的精神：
+# 沒有的資料不假裝有，代理值要在輸出中明確標註）。
+HARVEST_PROXY_WINDOW_DAYS = 30
+
 # 給使用者看的統一錯誤訊息（條款 18：使用者看白話、開發者看 log）。
 USER_MESSAGE_API_FAILED = "氣候資料暫時無法取得，請稍後再試一次。"
 USER_MESSAGE_NO_DATA = "這個產區與年份目前查不到氣候資料，請換一個年份看看。"
 USER_MESSAGE_QUOTA_HOUR = "氣候資料服務目前用量已滿，請一小時後再試。"
 USER_MESSAGE_QUOTA_DAY = "氣候資料服務今天的用量已滿，請明天再試。"
+USER_MESSAGE_INSUFFICIENT_BASELINE = "這個產區的基準線資料不足，無法計算距平，請稍後再試或聯絡開發者。"
 
 
 # --- 例外 -------------------------------------------------------------------
@@ -110,6 +120,15 @@ class ApiQuotaExceededError(ClimateDataError):
 
     跟一般的暫時性失敗分開，是因為這種情況等幾秒鐘重試沒有意義，呼叫端應該直接停手，
     而不是硬跑完剩下的產區、每個都卡三次重試。
+    """
+
+
+class InsufficientBaselineDataError(ClimateDataError):
+    """基準線有效年數不足（少於 2 年）或完全沒有資料，無法計算距平所需的平均與標準差。
+
+    跟單一天缺值是不同層級的問題：單日缺值只是排除該天不計入加總（見
+    `_season_climate_metrics`），不會走到這裡；只有整條基準線壞掉或年數太少、統計上算不出
+    標準差時才拋這個錯。
     """
 
 
@@ -778,6 +797,299 @@ def _write_json_cache(cache_path: Path, payload: dict[str, Any]) -> None:
         logger.warning("快取寫入失敗（不影響本次查詢結果）：%s（%r）", cache_path, exc)
 
 
+# --- T-07：GDD 與距平計算 ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MetricAnomaly:
+    """單一氣候指標（GDD／生長季降雨／採收前降雨代理值）的距平結果。
+
+    `vintage_missing_day_count`／`baseline_missing_day_count` 記錄計算這項指標時被排除
+    的缺值天數，缺值天數本身不計入加總或平均（不當 0、不補值，呼應條款 15）。`std` 為 0
+    （30 年數值完全相同）或 `mean` 為 0 時，對應的 `pct_anomaly`／`z_score` 回傳 `None`
+    而不是拋錯或除以 0。
+    """
+
+    metric_name: str
+    vintage_value: float
+    vintage_missing_day_count: int
+    baseline_mean: float
+    baseline_std: float
+    baseline_year_count: int
+    baseline_missing_day_count: int
+    baseline_years_with_missing_data: tuple[int, ...]
+    pct_anomaly: float | None
+    z_score: float | None
+
+
+@dataclass(frozen=True)
+class ClimateAnomaly:
+    """單一年份 vs. 30 年基準線的完整距平結果，對應 US-2.3 與 Backlog T-07。"""
+
+    region_canonical: str
+    region_zh: str
+    vintage_year: int
+    baseline_start_year: int
+    baseline_end_year: int
+    gdd: MetricAnomaly
+    season_precipitation: MetricAnomaly
+    pre_harvest_precipitation: MetricAnomaly
+    harvest_proxy_window_start: str
+    harvest_proxy_window_end: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """轉成可序列化的 dict，供之後的報告生成或快取使用。"""
+        return asdict(self)
+
+
+def _season_climate_metrics(
+    frame: pd.DataFrame, harvest_window_days: int = HARVEST_PROXY_WINDOW_DAYS
+) -> dict[str, Any]:
+    """從單一年份的每日 DataFrame 算出 GDD、生長季降雨、採收前降雨代理值。
+
+    GDD 逐日計算 `max(temp_mean - GDD_BASE_TEMP_C, 0)` 再加總；`temp_mean` 缺值的日子
+    直接跳過、不計入加總（不當 0，不用其他值填補，呼應條款 15）。降雨採一樣的缺值排除
+    邏輯。這個函式故意只吃「單一年份」的資料，同一份邏輯要同時用在目標年份與基準線的
+    每一年，順序才不會被誤用成「先跨年平均氣溫再算 GDD」。
+
+    Args:
+        frame: 單一年份的每日資料，需含 `date`、`temp_mean`、`precipitation_mm` 欄位。
+        harvest_window_days: 採收前降雨代理指標回推的天數（含當天），預設 30 天。
+
+    Returns:
+        dict，含 `gdd`、`gdd_missing_days`、`season_precip_mm`、
+        `season_precip_missing_days`、`pre_harvest_precip_mm`、`pre_harvest_missing_days`、
+        `pre_harvest_window_start`、`pre_harvest_window_end`（後兩者為 `YYYY-MM-DD` 字串）。
+
+    Raises:
+        ClimateDataError: `frame` 為空，沒有任何一天的資料可算。
+    """
+    if frame.empty:
+        raise ClimateDataError(
+            "這個年份沒有可用的氣候資料，無法計算距平。",
+            "傳入 _season_climate_metrics() 的 DataFrame 為空",
+        )
+
+    temp_valid = frame["temp_mean"].notna()
+    gdd = float(frame.loc[temp_valid, "temp_mean"].sub(GDD_BASE_TEMP_C).clip(lower=0.0).sum())
+    gdd_missing_days = int((~temp_valid).sum())
+
+    precip_valid = frame["precipitation_mm"].notna()
+    season_precip_mm = float(frame.loc[precip_valid, "precipitation_mm"].sum())
+    season_precip_missing_days = int((~precip_valid).sum())
+
+    season_end_date = frame["date"].max()
+    window_start = season_end_date - pd.Timedelta(days=harvest_window_days - 1)
+    window = frame[frame["date"] >= window_start]
+    window_valid = window["precipitation_mm"].notna()
+    pre_harvest_precip_mm = float(window.loc[window_valid, "precipitation_mm"].sum())
+    pre_harvest_missing_days = int((~window_valid).sum())
+
+    return {
+        "gdd": gdd,
+        "gdd_missing_days": gdd_missing_days,
+        "season_precip_mm": season_precip_mm,
+        "season_precip_missing_days": season_precip_missing_days,
+        "pre_harvest_precip_mm": pre_harvest_precip_mm,
+        "pre_harvest_missing_days": pre_harvest_missing_days,
+        "pre_harvest_window_start": window_start.strftime("%Y-%m-%d"),
+        "pre_harvest_window_end": season_end_date.strftime("%Y-%m-%d"),
+    }
+
+
+def _baseline_year_metrics(baseline: ClimateBaseline) -> dict[int, dict[str, Any]]:
+    """把 30 年基準線攤平後逐年計算三項指標。
+
+    GDD 必須逐年算完再取平均，不能先把 30 年的日溫平均起來再算 GDD——`max(t - base, 0)`
+    的截斷運算不能跟平均互換順序，先平均會讓冷涼產區的 GDD 被低估得更嚴重。
+
+    Args:
+        baseline: 產區的 30 年基準線。
+
+    Returns:
+        `{vintage_year: _season_climate_metrics() 的回傳 dict}`。
+
+    Raises:
+        InsufficientBaselineDataError: 基準線完全沒有可用的每日資料。
+    """
+    frame = baseline.to_dataframe()
+    if frame.empty:
+        raise InsufficientBaselineDataError(
+            USER_MESSAGE_INSUFFICIENT_BASELINE,
+            f"{baseline.region_canonical} 的基準線 to_dataframe() 為空",
+        )
+    return {
+        int(year): _season_climate_metrics(group.reset_index(drop=True))
+        for year, group in frame.groupby("vintage_year")
+    }
+
+
+def _baseline_metric_stats(values: list[float]) -> tuple[float, float, int]:
+    """算出基準線某項指標的平均值、標準差、有效年數。
+
+    標準差採母體標準差（`ddof=0`）：WMO 30 年氣候常態期的距平／z-score 慣例把這 30 年
+    視為該常態期的完整母體，不是對更長期氣候的抽樣估計，因此不用 pandas 預設的
+    `ddof=1`，需要明確指定。
+
+    Args:
+        values: 30 個年份（或實際年數）的單一指標數值。
+
+    Returns:
+        `(平均值, 標準差, 有效年數)`。
+
+    Raises:
+        InsufficientBaselineDataError: 有效年數少於 2，統計上無法定義標準差。
+    """
+    if len(values) < 2:
+        raise InsufficientBaselineDataError(
+            USER_MESSAGE_INSUFFICIENT_BASELINE,
+            f"基準線有效年數 {len(values)} < 2，無法計算標準差",
+        )
+    series = pd.Series(values, dtype="float64")
+    return float(series.mean()), float(series.std(ddof=0)), len(values)
+
+
+def _build_metric_anomaly(
+    metric_name: str,
+    value_key: str,
+    missing_key: str,
+    vintage_metrics: dict[str, Any],
+    per_year_metrics: dict[int, dict[str, Any]],
+) -> MetricAnomaly:
+    """組出單一指標的距平結果：百分比距平與 z-score 都算，並防呆除以 0。
+
+    缺值年份不會被排除在平均值計算之外（依專案決策：不設排除門檻，只標註缺值），
+    `baseline_years_with_missing_data` 只是告訴使用者「這些年份的計算排除了幾天缺值」，
+    不影響這些年份本身是否納入平均。
+
+    Args:
+        metric_name: 指標名稱，例：`"gdd"`。
+        value_key: 從 metrics dict 取數值的欄位名。
+        missing_key: 從 metrics dict 取缺值天數的欄位名。
+        vintage_metrics: 目標年份的 `_season_climate_metrics()` 回傳 dict。
+        per_year_metrics: 基準線逐年的 `_season_climate_metrics()` 回傳 dict。
+
+    Returns:
+        `MetricAnomaly`。
+    """
+    values = [metrics[value_key] for metrics in per_year_metrics.values()]
+    mean, std, year_count = _baseline_metric_stats(values)
+    vintage_value = vintage_metrics[value_key]
+
+    pct_anomaly = None if mean == 0 else (vintage_value - mean) / mean * 100
+    z_score = None if std == 0 else (vintage_value - mean) / std
+
+    baseline_missing = sum(metrics[missing_key] for metrics in per_year_metrics.values())
+    missing_years = tuple(
+        sorted(year for year, metrics in per_year_metrics.items() if metrics[missing_key] > 0)
+    )
+
+    return MetricAnomaly(
+        metric_name=metric_name,
+        vintage_value=vintage_value,
+        vintage_missing_day_count=vintage_metrics[missing_key],
+        baseline_mean=mean,
+        baseline_std=std,
+        baseline_year_count=year_count,
+        baseline_missing_day_count=baseline_missing,
+        baseline_years_with_missing_data=missing_years,
+        pct_anomaly=pct_anomaly,
+        z_score=z_score,
+    )
+
+
+def compute_climate_anomaly(season: SeasonClimate, baseline: ClimateBaseline) -> ClimateAnomaly:
+    """比較單一年份氣候與 30 年基準線，算出 GDD 與降雨的距平（百分比 + z-score）。
+
+    對應 US-2.3：量化「這年比 30 年平均暖多少、雨多少」。三項指標——GDD、生長季總降雨、
+    採收前 30 天降雨（代理指標）——都同時輸出百分比距平與 z-score。
+
+    Args:
+        season: 目標年份的生長季氣候（來自 `fetch_season_climate()`）。
+        baseline: 該產區的 30 年基準線（來自 `get_baseline()`）。
+
+    Returns:
+        `ClimateAnomaly`，含三項指標的距平與缺值天數統計。
+
+    Raises:
+        ClimateDataError: `season` 與 `baseline` 的產區不一致，或任一方沒有每日資料。
+        InsufficientBaselineDataError: 基準線有效年數少於 2。
+    """
+    if season.region_canonical != baseline.region_canonical:
+        raise ClimateDataError(
+            "氣候資料與基準線的產區不一致，請聯絡開發者。",
+            f"season.region_canonical={season.region_canonical!r} != "
+            f"baseline.region_canonical={baseline.region_canonical!r}",
+        )
+
+    vintage_metrics = _season_climate_metrics(season.to_dataframe())
+    per_year_metrics = _baseline_year_metrics(baseline)
+
+    gdd = _build_metric_anomaly(
+        "gdd", "gdd", "gdd_missing_days", vintage_metrics, per_year_metrics
+    )
+    season_precip = _build_metric_anomaly(
+        "season_precipitation_mm", "season_precip_mm", "season_precip_missing_days",
+        vintage_metrics, per_year_metrics,
+    )
+    pre_harvest = _build_metric_anomaly(
+        "pre_harvest_precipitation_mm", "pre_harvest_precip_mm", "pre_harvest_missing_days",
+        vintage_metrics, per_year_metrics,
+    )
+
+    return ClimateAnomaly(
+        region_canonical=season.region_canonical,
+        region_zh=season.region_zh,
+        vintage_year=season.vintage_year,
+        baseline_start_year=baseline.start_year,
+        baseline_end_year=baseline.end_year,
+        gdd=gdd,
+        season_precipitation=season_precip,
+        pre_harvest_precipitation=pre_harvest,
+        harvest_proxy_window_start=vintage_metrics["pre_harvest_window_start"],
+        harvest_proxy_window_end=vintage_metrics["pre_harvest_window_end"],
+    )
+
+
+def _describe_pct_anomaly(metric: MetricAnomaly, label: str) -> str:
+    """把單一指標的百分比距平轉成一句話，例：「GDD 比 30 年平均高 12%」。"""
+    if metric.pct_anomaly is None:
+        return f"{label}與 30 年平均持平（基準值為 0，無法算百分比）"
+    direction = "高" if metric.pct_anomaly >= 0 else "少"
+    return f"{label}比 30 年平均{direction}{abs(metric.pct_anomaly):.0f}%"
+
+
+def format_anomaly_summary(anomaly: ClimateAnomaly) -> str:
+    """把距平結果整理成人類可讀摘要，供 CLI 與後續報告生成參考。"""
+    headline = (
+        f"{anomaly.region_canonical}（{anomaly.region_zh}）{anomaly.vintage_year} "
+        f"{_describe_pct_anomaly(anomaly.gdd, 'GDD')}、"
+        f"{_describe_pct_anomaly(anomaly.season_precipitation, '生長季降雨')}。"
+    )
+    harvest_line = (
+        f"採收前 30 天降雨代理值（以生長季結束日 {anomaly.harvest_proxy_window_end} "
+        f"往前推算，非實際採收日）：{_describe_pct_anomaly(anomaly.pre_harvest_precipitation, '')}"
+    )
+    lines = [headline, harvest_line]
+
+    missing_notes = []
+    for metric, label in (
+        (anomaly.gdd, "GDD／溫度"),
+        (anomaly.season_precipitation, "生長季降雨"),
+        (anomaly.pre_harvest_precipitation, "採收前降雨"),
+    ):
+        if metric.vintage_missing_day_count:
+            missing_notes.append(f"{label}當年缺值 {metric.vintage_missing_day_count} 天")
+        if metric.baseline_missing_day_count:
+            missing_notes.append(
+                f"{label}基準線缺值合計 {metric.baseline_missing_day_count} 天"
+                f"（涉及年份：{list(metric.baseline_years_with_missing_data)}）"
+            )
+    if missing_notes:
+        lines.append("註：" + "；".join(missing_notes) + "，以上計算已排除缺值天數。")
+    return "\n".join(lines)
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -842,6 +1154,14 @@ def _run_warm_cache_command(args: argparse.Namespace) -> None:
         print(f"  {name:<20} {status}")
 
 
+def _run_anomaly_command(args: argparse.Namespace) -> None:
+    """CLI：計算並印出單一年份 vs. 30 年基準線的距平摘要（T-07）。"""
+    season = fetch_season_climate(args.region, args.year, use_cache=not args.refresh)
+    baseline = get_baseline(args.region, refresh=args.refresh)
+    anomaly = compute_climate_anomaly(season, baseline)
+    print(format_anomaly_summary(anomaly))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """建立 CLI 參數解析器。"""
     parser = argparse.ArgumentParser(
@@ -853,6 +1173,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline", action="store_true",
                         help=f"抓取／顯示 {BASELINE_START_YEAR}–{BASELINE_END_YEAR} 基準線")
     parser.add_argument("--warm-cache-all", action="store_true", help="一次預熱全部產區的基準線")
+    parser.add_argument("--anomaly", action="store_true",
+                        help="計算指定年份 vs. 30 年基準線的 GDD／降雨距平，需搭配 --region 與 --year")
     parser.add_argument("--list-regions", action="store_true", help="列出可查詢的產區")
     parser.add_argument("--refresh", action="store_true", help="忽略既有快取，強制重新抓取")
     parser.add_argument("--verbose", action="store_true", help="顯示 DEBUG 等級的開發者 log")
@@ -886,6 +1208,10 @@ def main(argv: list[str] | None = None) -> int:
             if not args.region:
                 parser.error("--baseline 需要搭配 --region")
             _run_baseline_command(args)
+        elif args.anomaly:
+            if not (args.region and args.year):
+                parser.error("--anomaly 需要搭配 --region 與 --year")
+            _run_anomaly_command(args)
         elif args.region and args.year:
             _run_season_command(args)
         else:
