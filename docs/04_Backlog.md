@@ -43,7 +43,7 @@
 | T-07 | 實作 GDD 與距平計算函式 | ✅ 完成 | 3h | T-06 | 輸入氣候資料，輸出 GDD 值與距平百分比 |
 | T-08 | 抓 30 年基準線氣候資料並快取 | ✅ 完成 | 2h | T-06 | `get_baseline()` 抓 1991–2020 共 30 季存成 `data/cache/{產區}_baseline_1991_2020.json`，第二次查詢不再打 API。`--warm-cache-all` 可一次預熱 20 產區 |
 | T-09 | 建立 Chroma 向量資料庫、匯入知識 | ✅ 完成 | 2h | T-05 | 可用 `chromadb.query()` 檢索到相關知識 |
-| T-10 | 實作 GPT-4o-mini Vision 酒標辨識函式 | | 3h | T-02 | 輸入圖片路徑，輸出結構化 JSON |
+| T-10 | 實作 GPT-4o-mini Vision 酒標辨識函式 | ✅ 完成 | 3h | T-02 | 輸入圖片路徑，輸出結構化 JSON |
 
 > **T-06／T-08 實作備註**
 >
@@ -64,11 +64,18 @@
 
 ### Agent 主流程
 
-| ID | 任務 | 預估 | 依賴 | 驗收條件 |
-|---|---|---|---|---|
-| T-11 | 定義 5 個 function calling tools 的 schema | 2h | T-06~T-10 | JSON schema 符合 OpenAI 規範 |
-| T-12 | 實作 Agent orchestrator（tool routing） | 4h | T-11 | 能自主呼叫 tools 完成完整流程 |
-| T-13 | 實作風味推測報告生成 prompt | 3h | T-12 | 報告含推測、限制、來源引用；system prompt 內建下方拒答清單 |
+| ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
+|---|---|---|---|---|---|
+| T-11 | 定義 5 個 function calling tools 的 schema | ✅ 完成 | 2h | T-06~T-10 | JSON schema 符合 OpenAI 規範 |
+| T-12 | 實作 Agent orchestrator（tool routing） | | 4h | T-11 | 能自主呼叫 tools 完成完整流程 |
+| T-13 | 實作風味推測報告生成 prompt | | 3h | T-12 | 報告含推測、限制、來源引用；system prompt 內建下方拒答清單 |
+
+> **T-10／T-11 實作備註**
+>
+> - HEIC 支援決定排除：原規劃含 JPG/PNG/HEIC，實作階段改為只驗證 JPG/JPEG/PNG，避免額外依賴 `pillow-heif`。已覆寫 CLAUDE.md 條款 27，`03_UserStory.md` US-1.1 同步標註。
+> - Vision 辨識用 OpenAI Structured Outputs（`response_format={"type": "json_schema", ...}` + `strict: True`）強制回應符合四欄位 schema，取代手刻 prompt 要求 JSON 再自行解析、修復的作法，回應格式異常的機率更低。
+> - 5 個 tools 定案為：氣候距平查詢、氣候知識檢索、風土/產區比較知識檢索、酒標辨識、產區合法性檢查。每個 dispatch 函式捕捉底層自訂例外轉成 `{"error": True, ...}` 回傳，不讓例外中斷 orchestrator——但 `check_region_validity` 刻意例外：查無產區是「查詢成功、答案為否」而非工具故障，回傳 `{"valid": False, "reason": ...}`，兩種 shape 不要日後誤合併。
+> - `src/tools.py` 額外附上 `TOOL_DISPATCH` 註冊表（工具名稱 → dispatch 函式），超出 T-11 本身「schema 符合規範」的驗收條件，是為 T-12 準備的查表呼叫便利設計。
 
 #### T-13 附帶規格：Agent 拒答清單
 
