@@ -74,6 +74,8 @@ python -m src.climate --region "Mendoza" --baseline
 python -m src.climate --warm-cache-all
 ```
 
+一次基準線請求要抓 30 年的每日資料，權重不低。Open-Meteo 免費方案的每小時額度大約只夠 13–14 個產區，所以 `--warm-cache-all` 要分兩次跑，中間隔一小時；碰到額度上限時它會停手並把剩下的產區標成「未抓取」，不會傻等。抓好的快取放在 `data/cache/`（約 12MB，已排除在版本控制外），之後查詢不再打 API。
+
 ---
 
 ## 文件索引
