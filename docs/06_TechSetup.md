@@ -90,11 +90,21 @@ terroir-teller/
 │   └── report.py              # 風味推測報告生成 prompt
 │
 ├── data/
-│   ├── regions.json           # 產區座標對照表
-│   ├── knowledge/             # 知識片段 Markdown
-│   │   ├── warm_dry.md
-│   │   ├── cool_wet.md
-│   │   └── ...
+│   ├── regions.json           # 產區座標對照表（由知識庫 frontmatter 生成）
+│   ├── knowledge/             # 知識庫（兩層混合架構，Schema v0.3）
+│   │   ├── climate_rules/     # 氣候規則層：氣候異常 → 風味推論通用原理
+│   │   │   ├── warm_dry.md
+│   │   │   ├── cool_wet.md
+│   │   │   ├── heatwave.md
+│   │   │   └── ...            # 共 10 則
+│   │   └── regions/           # 產區百科層：20 個產區 × 4–5 則
+│   │       ├── bordeaux/
+│   │       │   ├── 01_climate.md
+│   │       │   ├── 02_grape_cabernet_sauvignon.md
+│   │       │   ├── 03_grape_merlot.md
+│   │       │   ├── 04_terroir.md
+│   │       │   └── 05_comparison.md
+│   │       └── ...            # 共 88 則
 │   └── cache/                 # 30 年基準線氣候快取
 │       └── bordeaux_baseline.json
 │
