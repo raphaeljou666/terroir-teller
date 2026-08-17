@@ -246,6 +246,61 @@ Persona 小雅的主要使用情境是「站在超市貨架前用手機拍酒標
 
 ---
 
+## 【類別 13】知識庫結構與檢索
+
+### 34. 知識庫檔案位置與命名
+知識庫採**兩層混合架構**，兩層各司其職、禁止混放在同一資料夾：
+
+```
+data/knowledge/
+├── climate_rules/                  # 氣候規則層：氣候異常 → 風味推論的通用原理
+│   └── warm_dry.md, cool_wet.md, heatwave.md ...
+└── regions/                        # 產區百科層：品種、風土、產區對比
+    └── bordeaux/
+        ├── 01_climate.md
+        ├── 02_grape_cabernet_sauvignon.md
+        ├── 04_terroir.md
+        └── 05_comparison.md
+```
+
+- Climate rules：`data/knowledge/climate_rules/{scenario}.md`，`scenario` 用 snake_case 英文
+- Region：`data/knowledge/regions/{region_snake_case}/{seq}_{topic}.md`，`seq` 為兩位數序號
+- 資料夾名要與檔案內 `region_canonical` 欄位對得起來（例：`bordeaux/` ↔ `"Bordeaux"`）
+- 禁止使用中文檔名或中文資料夾名
+
+### 35. YAML frontmatter 為必要格式
+每個知識檔開頭都必須有 YAML frontmatter，`schema_version` 統一為 `"0.3"`。兩層欄位不同：
+
+- **regions 層**：`region_canonical`、`region_zh`、`region_aliases`、`country`、`hemisphere`、`latitude`、`longitude`、`climate_zone`、`climate_type`、`topic`、`grape_focus`、`main_grapes`、`key_facts`
+- **climate_rules 層**：`rule_type`、`condition`（temperature／precipitation／magnitude／duration）、`applies_to`（grape_types／climate_zones）
+
+兩層共通必備：`id`、`schema_version`、`tags`、`sources`、`confidence`、`last_updated`。
+
+匯入 Chroma 時：frontmatter 解析為 metadata dict、body 解析為 document text。
+
+### 36. 兩層檢索邏輯與汙染防範
+- Chroma collection 內用 metadata 欄位 `layer: "climate_rule"` 或 `layer: "region"` 區分兩層
+- 一般查詢從兩層各取 Top-K 混合餵給 LLM；產區相關查詢可用 `region_canonical` 精準過濾
+- **氣候推論主線只檢索 `climate_rules` 層與 regions 層中 `topic: "climate"` 的片段**。`terroir`、`comparison` 這類與氣候無關的片段，僅在使用者明確問到風土或產區比較時才檢索
+
+這條防範是必要的：若不過濾，報告會從「氣候證據推論」漂移成「產區介紹」，失去本專案相對於一般酒類 App 的差異點，也違背 `01_PRD.md` 的產品定位。
+
+### 37. 知識庫內容撰寫規範
+- 全文繁體中文（台灣用語），遵守條款 1、2
+- 品種名、產區名首次出現用「英文（中文譯名）」並列，之後可只用英文（呼應條款 3）
+- 每則都要附出處，`confidence` 分三級：
+  - `high`：3 個以上權威來源交叉驗證
+  - `medium`：1–2 個來源，或來源之間有差異
+  - `low`：單一來源或屬估算值
+- 交付前依條款 33 套用 `.claude/humanizer-zh.md` 檢查，去除 AI 寫作痕跡
+
+### 38. Agent 回答語氣與引用
+- 使用「可能傾向」「通常呈現」「多數情況下」等保留措辭，禁止斷言句（呼應條款 16）
+- 每段推測都要對應到 climate_rules 或 regions 的知識庫引用（呼應條款 17）
+- 若問題無法從知識庫回答，誠實告知「本系統知識庫未涵蓋」，**不得憑 LLM 常識瞎編**（呼應條款 15 禁止編造資料的精神）
+
+---
+
 ## 附錄：開始新任務前的自檢清單
 
 Claude Code 每次開始新任務前，先自問：
@@ -256,6 +311,7 @@ Claude Code 每次開始新任務前，先自問：
 - [ ] 產出的程式碼是否符合類別 1、2 的語言與命名規範？
 - [ ] 是否需要處理錯誤、加日誌、寫測試？
 - [ ] 這個任務會產出面向使用者的文字內容嗎？若會，是否已依 `.claude/humanizer-zh.md` 撰寫（條款 33）？
+- [ ] 有動到知識庫嗎？檔案位置、frontmatter 欄位、檢索過濾是否符合條款 34–36？
 - [ ] 完成後要更新哪些文件？
 
 若任一項不確定，先問使用者再動工。

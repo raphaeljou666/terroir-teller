@@ -24,6 +24,7 @@ data/cache/*
 # OS
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
 
 # Jupyter
 .ipynb_checkpoints/

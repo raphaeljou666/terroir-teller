@@ -1,1 +1,440 @@
-[]
+[
+  {
+    "region_canonical": "Alsace",
+    "region_zh": "阿爾薩斯",
+    "region_aliases": [
+      "Alsace",
+      "阿爾薩斯"
+    ],
+    "country": "France",
+    "country_zh": "法國",
+    "hemisphere": "N",
+    "latitude": 48.2,
+    "longitude": 7.35,
+    "climate_zone": "cool",
+    "climate_type": "continental",
+    "main_grapes": [
+      "Riesling",
+      "Gewürztraminer",
+      "Pinot Gris"
+    ],
+    "knowledge_dir": "data/knowledge/regions/alsace"
+  },
+  {
+    "region_canonical": "Barolo",
+    "region_zh": "巴羅洛",
+    "region_aliases": [
+      "Barolo",
+      "巴羅洛",
+      "Langhe",
+      "朗給"
+    ],
+    "country": "Italy",
+    "country_zh": "義大利",
+    "hemisphere": "N",
+    "latitude": 44.61,
+    "longitude": 7.94,
+    "climate_zone": "intermediate",
+    "climate_type": "semi-continental",
+    "main_grapes": [
+      "Nebbiolo"
+    ],
+    "knowledge_dir": "data/knowledge/regions/barolo"
+  },
+  {
+    "region_canonical": "Barossa Valley",
+    "region_zh": "巴羅莎谷",
+    "region_aliases": [
+      "Barossa Valley",
+      "Barossa",
+      "巴羅莎谷",
+      "巴羅莎"
+    ],
+    "country": "Australia",
+    "country_zh": "澳洲",
+    "hemisphere": "S",
+    "latitude": -34.53,
+    "longitude": 138.94,
+    "climate_zone": "warm",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Shiraz",
+      "Cabernet Sauvignon",
+      "Grenache"
+    ],
+    "knowledge_dir": "data/knowledge/regions/barossa_valley"
+  },
+  {
+    "region_canonical": "Bordeaux",
+    "region_zh": "波爾多",
+    "region_aliases": [
+      "Bordeaux",
+      "波爾多",
+      "波尔多"
+    ],
+    "country": "France",
+    "country_zh": "法國",
+    "hemisphere": "N",
+    "latitude": 44.84,
+    "longitude": -0.58,
+    "climate_zone": "intermediate",
+    "climate_type": "maritime",
+    "main_grapes": [
+      "Cabernet Sauvignon",
+      "Merlot",
+      "Cabernet Franc",
+      "Sauvignon Blanc",
+      "Sémillon"
+    ],
+    "knowledge_dir": "data/knowledge/regions/bordeaux"
+  },
+  {
+    "region_canonical": "Bourgogne",
+    "region_zh": "勃根地",
+    "region_aliases": [
+      "Bourgogne",
+      "Burgundy",
+      "勃根地",
+      "勃艮第",
+      "布根地"
+    ],
+    "country": "France",
+    "country_zh": "法國",
+    "hemisphere": "N",
+    "latitude": 47.05,
+    "longitude": 4.84,
+    "climate_zone": "cool",
+    "climate_type": "semi-continental",
+    "main_grapes": [
+      "Pinot Noir",
+      "Chardonnay",
+      "Aligoté",
+      "Gamay"
+    ],
+    "knowledge_dir": "data/knowledge/regions/bourgogne"
+  },
+  {
+    "region_canonical": "Central Otago",
+    "region_zh": "中奧塔哥",
+    "region_aliases": [
+      "Central Otago",
+      "中奧塔哥"
+    ],
+    "country": "New Zealand",
+    "country_zh": "紐西蘭",
+    "hemisphere": "S",
+    "latitude": -45.03,
+    "longitude": 169.15,
+    "climate_zone": "cool",
+    "climate_type": "continental",
+    "main_grapes": [
+      "Pinot Noir"
+    ],
+    "knowledge_dir": "data/knowledge/regions/central_otago"
+  },
+  {
+    "region_canonical": "Champagne",
+    "region_zh": "香檳",
+    "region_aliases": [
+      "Champagne",
+      "香檳",
+      "香檳區"
+    ],
+    "country": "France",
+    "country_zh": "法國",
+    "hemisphere": "N",
+    "latitude": 49.05,
+    "longitude": 4.03,
+    "climate_zone": "cool",
+    "climate_type": "continental",
+    "main_grapes": [
+      "Chardonnay",
+      "Pinot Noir",
+      "Pinot Meunier"
+    ],
+    "knowledge_dir": "data/knowledge/regions/champagne"
+  },
+  {
+    "region_canonical": "Chianti",
+    "region_zh": "奇揚地",
+    "region_aliases": [
+      "Chianti",
+      "Chianti Classico",
+      "奇揚地",
+      "奇揚地經典區",
+      "托斯卡尼"
+    ],
+    "country": "Italy",
+    "country_zh": "義大利",
+    "hemisphere": "N",
+    "latitude": 43.47,
+    "longitude": 11.35,
+    "climate_zone": "warm",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Sangiovese"
+    ],
+    "knowledge_dir": "data/knowledge/regions/chianti"
+  },
+  {
+    "region_canonical": "Douro",
+    "region_zh": "斗羅河",
+    "region_aliases": [
+      "Douro",
+      "Douro Valley",
+      "斗羅河",
+      "斗羅河谷",
+      "波特酒產區"
+    ],
+    "country": "Portugal",
+    "country_zh": "葡萄牙",
+    "hemisphere": "N",
+    "latitude": 41.16,
+    "longitude": -7.75,
+    "climate_zone": "warm",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Touriga Nacional",
+      "Touriga Franca"
+    ],
+    "knowledge_dir": "data/knowledge/regions/douro"
+  },
+  {
+    "region_canonical": "Maipo Valley",
+    "region_zh": "邁坡谷",
+    "region_aliases": [
+      "Maipo Valley",
+      "邁坡谷",
+      "邁波谷"
+    ],
+    "country": "Chile",
+    "country_zh": "智利",
+    "hemisphere": "S",
+    "latitude": -33.75,
+    "longitude": -70.65,
+    "climate_zone": "warm",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Cabernet Sauvignon",
+      "Carmenère"
+    ],
+    "knowledge_dir": "data/knowledge/regions/maipo_valley"
+  },
+  {
+    "region_canonical": "Margaret River",
+    "region_zh": "瑪格麗特河",
+    "region_aliases": [
+      "Margaret River",
+      "瑪格麗特河"
+    ],
+    "country": "Australia",
+    "country_zh": "澳洲",
+    "hemisphere": "S",
+    "latitude": -33.95,
+    "longitude": 115.07,
+    "climate_zone": "intermediate",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Cabernet Sauvignon",
+      "Chardonnay"
+    ],
+    "knowledge_dir": "data/knowledge/regions/margaret_river"
+  },
+  {
+    "region_canonical": "Marlborough",
+    "region_zh": "馬爾堡",
+    "region_aliases": [
+      "Marlborough",
+      "馬爾堡",
+      "馬爾波羅"
+    ],
+    "country": "New Zealand",
+    "country_zh": "紐西蘭",
+    "hemisphere": "S",
+    "latitude": -41.52,
+    "longitude": 173.87,
+    "climate_zone": "cool",
+    "climate_type": "maritime",
+    "main_grapes": [
+      "Sauvignon Blanc",
+      "Pinot Noir",
+      "Chardonnay"
+    ],
+    "knowledge_dir": "data/knowledge/regions/marlborough"
+  },
+  {
+    "region_canonical": "Mendoza",
+    "region_zh": "門多薩",
+    "region_aliases": [
+      "Mendoza",
+      "Uco Valley",
+      "門多薩",
+      "門多薩烏可谷",
+      "烏可谷"
+    ],
+    "country": "Argentina",
+    "country_zh": "阿根廷",
+    "hemisphere": "S",
+    "latitude": -33.65,
+    "longitude": -69.35,
+    "climate_zone": "warm",
+    "climate_type": "continental",
+    "main_grapes": [
+      "Malbec"
+    ],
+    "knowledge_dir": "data/knowledge/regions/mendoza"
+  },
+  {
+    "region_canonical": "Mosel",
+    "region_zh": "摩塞爾",
+    "region_aliases": [
+      "Mosel",
+      "Moselle",
+      "摩塞爾",
+      "莫塞爾"
+    ],
+    "country": "Germany",
+    "country_zh": "德國",
+    "hemisphere": "N",
+    "latitude": 49.98,
+    "longitude": 7.13,
+    "climate_zone": "cool",
+    "climate_type": "continental",
+    "main_grapes": [
+      "Riesling"
+    ],
+    "knowledge_dir": "data/knowledge/regions/mosel"
+  },
+  {
+    "region_canonical": "Napa Valley",
+    "region_zh": "納帕谷",
+    "region_aliases": [
+      "Napa Valley",
+      "Napa",
+      "納帕谷",
+      "納帕"
+    ],
+    "country": "United States",
+    "country_zh": "美國",
+    "hemisphere": "N",
+    "latitude": 38.5,
+    "longitude": -122.27,
+    "climate_zone": "warm",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Cabernet Sauvignon",
+      "Chardonnay",
+      "Merlot",
+      "Sauvignon Blanc"
+    ],
+    "knowledge_dir": "data/knowledge/regions/napa_valley"
+  },
+  {
+    "region_canonical": "Northern Rhône",
+    "region_zh": "北隆河",
+    "region_aliases": [
+      "Northern Rhône",
+      "Rhône Septentrional",
+      "北隆河",
+      "北隆河谷"
+    ],
+    "country": "France",
+    "country_zh": "法國",
+    "hemisphere": "N",
+    "latitude": 45.1,
+    "longitude": 4.85,
+    "climate_zone": "intermediate",
+    "climate_type": "semi-continental",
+    "main_grapes": [
+      "Syrah",
+      "Viognier"
+    ],
+    "knowledge_dir": "data/knowledge/regions/northern_rhone"
+  },
+  {
+    "region_canonical": "Rioja",
+    "region_zh": "里奧哈",
+    "region_aliases": [
+      "Rioja",
+      "里奧哈",
+      "Rioja Alta",
+      "Rioja Alavesa",
+      "Rioja Oriental"
+    ],
+    "country": "Spain",
+    "country_zh": "西班牙",
+    "hemisphere": "N",
+    "latitude": 42.47,
+    "longitude": -2.45,
+    "climate_zone": "intermediate",
+    "climate_type": "semi-continental",
+    "main_grapes": [
+      "Tempranillo"
+    ],
+    "knowledge_dir": "data/knowledge/regions/rioja"
+  },
+  {
+    "region_canonical": "Sonoma County",
+    "region_zh": "索諾瑪",
+    "region_aliases": [
+      "Sonoma County",
+      "Sonoma",
+      "索諾瑪",
+      "索諾瑪郡"
+    ],
+    "country": "United States",
+    "country_zh": "美國",
+    "hemisphere": "N",
+    "latitude": 38.45,
+    "longitude": -122.85,
+    "climate_zone": "intermediate",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Pinot Noir",
+      "Chardonnay"
+    ],
+    "knowledge_dir": "data/knowledge/regions/sonoma"
+  },
+  {
+    "region_canonical": "Stellenbosch",
+    "region_zh": "斯泰倫博斯",
+    "region_aliases": [
+      "Stellenbosch",
+      "斯泰倫博斯",
+      "史特蘭"
+    ],
+    "country": "South Africa",
+    "country_zh": "南非",
+    "hemisphere": "S",
+    "latitude": -33.93,
+    "longitude": 18.86,
+    "climate_zone": "warm",
+    "climate_type": "mediterranean",
+    "main_grapes": [
+      "Cabernet Sauvignon",
+      "Chenin Blanc",
+      "Pinotage"
+    ],
+    "knowledge_dir": "data/knowledge/regions/stellenbosch"
+  },
+  {
+    "region_canonical": "Willamette Valley",
+    "region_zh": "威廉梅特谷",
+    "region_aliases": [
+      "Willamette Valley",
+      "威廉梅特谷",
+      "威拉米特谷"
+    ],
+    "country": "United States",
+    "country_zh": "美國",
+    "hemisphere": "N",
+    "latitude": 45.15,
+    "longitude": -123.1,
+    "climate_zone": "cool",
+    "climate_type": "maritime",
+    "main_grapes": [
+      "Pinot Noir"
+    ],
+    "knowledge_dir": "data/knowledge/regions/willamette_valley"
+  }
+]
