@@ -211,6 +211,50 @@ def test_查詢未來年份時明確告知查不到而不是回傳空資料() ->
     assert str(future_year) in excinfo.value.user_message
 
 
+class _FakeResponse:
+    """最小可用的假 httpx 回應，只提供 `_request_archive` 會用到的介面。"""
+
+    def __init__(self, status_code: int, payload: dict[str, Any] | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = str(self._payload)
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+def test_遇到_429_會等待重試而不是當成參數錯誤放棄(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 批次預熱 20 個產區時實際踩到過：429 是每分鐘上限，等一下就好，不該歸類成不可重試。
+    responses = [
+        _FakeResponse(429, {"reason": "Minutely API request limit exceeded."}),
+        _FakeResponse(200, _fake_payload()),
+    ]
+    monkeypatch.setattr(climate, "RATE_LIMIT_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(climate.httpx, "get", lambda *a, **k: responses.pop(0))
+
+    payload = climate._request_archive(44.84, -0.58, date(2019, 4, 1), date(2019, 4, 2))
+    assert payload["daily"]["time"] == ["2019-04-01", "2019-04-02"]
+    assert not responses, "第一次 429 後應該重試第二次"
+
+
+def test_參數錯誤的_4xx_不重試直接拋錯(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def fake_get(*_args: Any, **_kwargs: Any) -> _FakeResponse:
+        calls["n"] += 1
+        return _FakeResponse(400, {"reason": "Data corrupted at path ''."})
+
+    monkeypatch.setattr(climate.httpx, "get", fake_get)
+    with pytest.raises(climate.ClimateDataError) as excinfo:
+        climate._request_archive(44.84, -0.58, date(2019, 4, 1), date(2019, 4, 2))
+
+    assert calls["n"] == 1
+    assert "400" in excinfo.value.technical_detail
+
+
 def test_錯誤訊息分兩層() -> None:
     error = climate.ClimateDataError("資料暫時無法取得。", "HTTP 500: upstream timeout")
     # 條款 18：使用者看不到 stack trace 這類技術細節。

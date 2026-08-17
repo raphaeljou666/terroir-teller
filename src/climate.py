@@ -63,6 +63,14 @@ REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
 
+# Open-Meteo 免費方案有每分鐘請求上限，超過會回 429 並要求等一分鐘。
+RATE_LIMIT_STATUS = 429
+RATE_LIMIT_WAIT_SECONDS = 65.0
+
+# 批次預熱時每個產區之間的間隔。一次基準線請求要抓 30 年的每日資料，權重不低，
+# 連續打很容易踩到每分鐘上限。
+WARM_CACHE_DELAY_SECONDS = 10.0
+
 # ERA5 重分析資料約有 5 天延遲，接近今天的日期抓不到。
 ARCHIVE_LAG_DAYS = 6
 
@@ -93,6 +101,10 @@ class ClimateDataError(Exception):
 
 class RegionNotFoundError(ClimateDataError):
     """查無此產區（不在 `data/regions.json` 的 20 個產區清單內）。"""
+
+
+class _RateLimitedError(Exception):
+    """模組內部用：Open-Meteo 回 429，等一下重試就好，不對外拋出。"""
 
 
 # --- 資料結構 ---------------------------------------------------------------
@@ -333,7 +345,8 @@ def _extract_api_reason(response: httpx.Response) -> str:
 def _request_archive(latitude: float, longitude: float, start: date, end: date) -> dict[str, Any]:
     """實際打一次 Open-Meteo Archive API，含重試與錯誤處理（條款 14）。
 
-    4xx 屬於參數錯誤，重試也不會好，直接拋錯；連線逾時、5xx 這類暫時性問題才重試。
+    4xx 多半是參數錯誤，重試也不會好，直接拋錯。例外是 429（超過每分鐘請求上限），那是
+    暫時性的，等一分鐘再試就會過。連線逾時、5xx 同樣會重試。
 
     Args:
         latitude: 緯度（南半球為負值）。
@@ -360,6 +373,8 @@ def _request_archive(latitude: float, longitude: float, start: date, end: date) 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = httpx.get(ARCHIVE_API_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+            if response.status_code == RATE_LIMIT_STATUS:
+                raise _RateLimitedError(_extract_api_reason(response))
             if 400 <= response.status_code < 500:
                 reason = _extract_api_reason(response)
                 logger.error("Open-Meteo 參數錯誤 %s：%s", response.status_code, reason)
@@ -368,6 +383,15 @@ def _request_archive(latitude: float, longitude: float, start: date, end: date) 
                 )
             response.raise_for_status()
             payload = response.json()
+        except _RateLimitedError as exc:
+            last_error = exc
+            logger.warning(
+                "Open-Meteo 已達每分鐘請求上限，等 %.0f 秒後重試（第 %d/%d 次）：%s",
+                RATE_LIMIT_WAIT_SECONDS, attempt, MAX_RETRIES, exc,
+            )
+            if attempt < MAX_RETRIES:
+                time.sleep(RATE_LIMIT_WAIT_SECONDS)
+            continue
         except (httpx.HTTPError, ValueError) as exc:
             last_error = exc
             logger.warning(
@@ -656,7 +680,9 @@ def _read_baseline_cache(cache_path: Path) -> ClimateBaseline | None:
 def warm_all_baselines(refresh: bool = False) -> dict[str, str]:
     """預熱全部 20 個產區的基準線快取，供 demo 前一次抓好用。
 
-    單一產區失敗不會中斷其他產區，最後統一回報結果。
+    單一產區失敗不會中斷其他產區，最後統一回報結果。每個產區之間會停
+    `WARM_CACHE_DELAY_SECONDS` 秒——一次基準線請求要抓 30 年的每日資料，20 個產區連續打
+    會撞上免費方案的每分鐘上限。已經有快取的產區不用等，直接跳過。
 
     Args:
         refresh: 設為 `True` 會忽略既有快取，全部重新抓取。
@@ -665,8 +691,11 @@ def warm_all_baselines(refresh: bool = False) -> dict[str, str]:
         以產區正式名為 key、狀態字串為 value 的 dict（`"ok（30 年）"` 或 `"失敗：..."`）。
     """
     results: dict[str, str] = {}
-    for region in load_regions():
+    for index, region in enumerate(load_regions()):
         name = region["region_canonical"]
+        needs_fetch = refresh or _read_baseline_cache(baseline_cache_path(region)) is None
+        if needs_fetch and index > 0:
+            time.sleep(WARM_CACHE_DELAY_SECONDS)
         try:
             baseline = get_baseline(name, refresh=refresh)
         except ClimateDataError as exc:
