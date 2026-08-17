@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from src import climate
@@ -298,3 +299,248 @@ def test_錯誤訊息分兩層() -> None:
     # 條款 18：使用者看不到 stack trace 這類技術細節。
     assert "HTTP" not in error.user_message
     assert error.technical_detail
+
+
+# --- GDD 與距平計算（T-07） --------------------------------------------------
+
+
+def _daily_frame(
+    dates: list[str], temps: list[float | None], precips: list[float | None]
+) -> pd.DataFrame:
+    """組一份最小可用的每日 DataFrame，供 `_season_climate_metrics` 系列測試使用。"""
+    return pd.DataFrame({
+        "date": pd.to_datetime(dates),
+        "temp_mean": temps,
+        "precipitation_mm": precips,
+    })
+
+
+def _make_anomaly_season(
+    vintage_year: int,
+    dates: list[str],
+    temps: list[float | None],
+    precips: list[float | None],
+    region_name: str = "Bordeaux",
+) -> climate.SeasonClimate:
+    """組一個指定溫度／降雨的 `SeasonClimate`，供距平計算測試自訂數值用。"""
+    region = climate.find_region(region_name)
+    start, end = climate.growing_season_range(vintage_year, region["hemisphere"])
+    daily = [
+        climate.DailyRecord(
+            date=d, temp_max=t, temp_min=t, temp_mean=t,
+            precipitation_mm=p, sunshine_hours=5.0,
+        )
+        for d, t, p in zip(dates, temps, precips)
+    ]
+    return climate.SeasonClimate(
+        region_canonical=region["region_canonical"],
+        region_zh=region["region_zh"],
+        country=region["country"],
+        hemisphere=region["hemisphere"],
+        latitude=region["latitude"],
+        longitude=region["longitude"],
+        vintage_year=vintage_year,
+        season_start=str(start),
+        season_end=str(end),
+        timezone="UTC",
+        source="test-fixture",
+        is_partial=False,
+        daily=daily,
+    )
+
+
+def _make_anomaly_baseline(
+    seasons: list[climate.SeasonClimate], region_name: str = "Bordeaux"
+) -> climate.ClimateBaseline:
+    """組一個由自訂 `SeasonClimate` 清單構成的假基準線。"""
+    region = climate.find_region(region_name)
+    years = [season.vintage_year for season in seasons]
+    return climate.ClimateBaseline(
+        region_canonical=region["region_canonical"],
+        region_zh=region["region_zh"],
+        country=region["country"],
+        hemisphere=region["hemisphere"],
+        latitude=region["latitude"],
+        longitude=region["longitude"],
+        start_year=min(years) if years else climate.BASELINE_START_YEAR,
+        end_year=max(years) if years else climate.BASELINE_END_YEAR,
+        timezone="UTC",
+        source="test-fixture",
+        fetched_at="2026-08-17T00:00:00Z",
+        seasons=seasons,
+    )
+
+
+def test_GDD_只計入超過基礎溫度的部分且缺值不計入() -> None:
+    frame = _daily_frame(
+        ["2019-04-01", "2019-04-02", "2019-04-03", "2019-04-04"],
+        [5.0, 15.0, None, 25.0],
+        [0.0, 0.0, 0.0, 0.0],
+    )
+    metrics = climate._season_climate_metrics(frame, harvest_window_days=4)
+    # max(5-10,0)=0、max(15-10,0)=5、缺值那天跳過不計、max(25-10,0)=15。
+    assert metrics["gdd"] == pytest.approx(0 + 5 + 15)
+    assert metrics["gdd_missing_days"] == 1
+
+
+def test_逐年算_GDD_再平均_跟_先平均氣溫再算_GDD_結果不同() -> None:
+    # 年份 A：兩天都是 12°C，逐日 GDD 為 2、2，年總和 4。
+    # 年份 B：兩天都是 6°C，逐日 GDD 為 0、0，年總和 0。
+    season_a = _make_anomaly_season(
+        2020, ["2020-04-01", "2020-04-02"], [12.0, 12.0], [0.0, 0.0]
+    )
+    season_b = _make_anomaly_season(
+        2021, ["2021-04-01", "2021-04-02"], [6.0, 6.0], [0.0, 0.0]
+    )
+    baseline = _make_anomaly_baseline([season_a, season_b])
+
+    per_year = climate._baseline_year_metrics(baseline)
+    assert per_year[2020]["gdd"] == pytest.approx(4.0)
+    assert per_year[2021]["gdd"] == pytest.approx(0.0)
+
+    # 正確做法：逐年算完 GDD 再平均 → (4 + 0) / 2 = 2.0。
+    correct_mean_gdd = sum(metrics["gdd"] for metrics in per_year.values()) / len(per_year)
+    assert correct_mean_gdd == pytest.approx(2.0)
+
+    # 錯誤做法（先把兩年同一天的氣溫平均，再算 GDD）：每天平均溫都是 9°C，
+    # max(9-10,0)=0，兩天加總還是 0——跟正確答案的 2.0 明顯不同，證明順序不能顛倒。
+    wrong_avg_day1 = (12.0 + 6.0) / 2
+    wrong_avg_day2 = (12.0 + 6.0) / 2
+    wrong_gdd = max(wrong_avg_day1 - climate.GDD_BASE_TEMP_C, 0) + max(
+        wrong_avg_day2 - climate.GDD_BASE_TEMP_C, 0
+    )
+    assert wrong_gdd == pytest.approx(0.0)
+    assert correct_mean_gdd != pytest.approx(wrong_gdd)
+
+
+def test_百分比距平與_z_score_對照手算數值() -> None:
+    # 基準線三年 GDD 分別為 10、20、30：平均 20，母體標準差 sqrt(200/3) ≈ 8.16497。
+    per_year_metrics = {
+        1991: {"gdd": 10.0, "gdd_missing_days": 0},
+        1992: {"gdd": 20.0, "gdd_missing_days": 0},
+        1993: {"gdd": 30.0, "gdd_missing_days": 0},
+    }
+    vintage_metrics = {"gdd": 26.0, "gdd_missing_days": 0}
+
+    metric = climate._build_metric_anomaly(
+        "gdd", "gdd", "gdd_missing_days", vintage_metrics, per_year_metrics
+    )
+
+    assert metric.baseline_mean == pytest.approx(20.0)
+    assert metric.pct_anomaly == pytest.approx(30.0)  # (26-20)/20*100
+    assert metric.z_score == pytest.approx((26.0 - 20.0) / (200 / 3) ** 0.5, rel=1e-6)
+
+
+def test_缺值天數會標記在輸出而不是默默略過() -> None:
+    season = _make_anomaly_season(
+        2022, ["2022-04-01", "2022-04-02"], [15.0, None], [1.0, 2.0]
+    )
+    baseline = _make_anomaly_baseline([
+        _make_anomaly_season(2019, ["2019-04-01", "2019-04-02"], [10.0, 11.0], [0.5, 0.5]),
+        _make_anomaly_season(2020, ["2020-04-01", "2020-04-02"], [12.0, 13.0], [1.0, 1.0]),
+        _make_anomaly_season(2021, ["2021-04-01", "2021-04-02"], [None, 14.0], [None, 2.0]),
+    ])
+
+    anomaly = climate.compute_climate_anomaly(season, baseline)
+
+    assert anomaly.gdd.vintage_missing_day_count == 1
+    assert anomaly.gdd.baseline_missing_day_count == 1
+    assert anomaly.gdd.baseline_years_with_missing_data == (2021,)
+
+
+def test_基準線標準差為_0_時_z_score_為_None_不拋錯() -> None:
+    per_year_metrics = {
+        1991: {"gdd": 5.0, "gdd_missing_days": 0},
+        1992: {"gdd": 5.0, "gdd_missing_days": 0},
+        1993: {"gdd": 5.0, "gdd_missing_days": 0},
+    }
+    vintage_metrics = {"gdd": 10.0, "gdd_missing_days": 0}
+
+    metric = climate._build_metric_anomaly(
+        "gdd", "gdd", "gdd_missing_days", vintage_metrics, per_year_metrics
+    )
+    assert metric.z_score is None
+    assert metric.pct_anomaly == pytest.approx(100.0)
+
+
+def test_基準線平均值為_0_時_百分比距平為_None_不除以_0() -> None:
+    per_year_metrics = {
+        1991: {"season_precip_mm": -10.0, "season_precip_missing_days": 0},
+        1992: {"season_precip_mm": 10.0, "season_precip_missing_days": 0},
+        1993: {"season_precip_mm": 0.0, "season_precip_missing_days": 0},
+    }
+    vintage_metrics = {"season_precip_mm": 5.0, "season_precip_missing_days": 0}
+
+    metric = climate._build_metric_anomaly(
+        "season_precipitation_mm", "season_precip_mm", "season_precip_missing_days",
+        vintage_metrics, per_year_metrics,
+    )
+    assert metric.baseline_mean == pytest.approx(0.0)
+    assert metric.pct_anomaly is None
+    assert metric.z_score is not None
+
+
+def test_基準線有效年數不足時拋出_InsufficientBaselineDataError() -> None:
+    season = _make_anomaly_season(2022, ["2022-04-01"], [15.0], [1.0])
+    baseline = _make_anomaly_baseline([
+        _make_anomaly_season(2019, ["2019-04-01"], [12.0], [1.0]),
+    ])
+    with pytest.raises(climate.InsufficientBaselineDataError):
+        climate.compute_climate_anomaly(season, baseline)
+
+
+def test_基準線完全沒有每日資料時拋出_InsufficientBaselineDataError() -> None:
+    baseline = _make_anomaly_baseline([])
+    with pytest.raises(climate.InsufficientBaselineDataError):
+        climate._baseline_year_metrics(baseline)
+
+
+def test_採收前降雨代理值有明確起訖日() -> None:
+    frame = _daily_frame(
+        ["2019-04-01", "2019-04-02", "2019-04-03"],
+        [15.0, 15.0, 15.0],
+        [1.0, 2.0, 3.0],
+    )
+    metrics = climate._season_climate_metrics(frame, harvest_window_days=2)
+    assert metrics["pre_harvest_window_start"] == "2019-04-02"
+    assert metrics["pre_harvest_window_end"] == "2019-04-03"
+    assert metrics["pre_harvest_precip_mm"] == pytest.approx(2.0 + 3.0)
+
+
+def test_人類可讀摘要符合目標句型且標註採收日為代理值() -> None:
+    def _metric(
+        pct: float, missing: int = 0, missing_years: tuple[int, ...] = ()
+    ) -> climate.MetricAnomaly:
+        return climate.MetricAnomaly(
+            metric_name="x", vintage_value=0.0, vintage_missing_day_count=missing,
+            baseline_mean=100.0, baseline_std=10.0, baseline_year_count=30,
+            baseline_missing_day_count=len(missing_years),
+            baseline_years_with_missing_data=missing_years,
+            pct_anomaly=pct, z_score=pct / 10,
+        )
+
+    anomaly = climate.ClimateAnomaly(
+        region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
+        baseline_start_year=1991, baseline_end_year=2020,
+        gdd=_metric(12.0), season_precipitation=_metric(-20.0),
+        pre_harvest_precipitation=_metric(-56.0, missing=2, missing_years=(1995,)),
+        harvest_proxy_window_start="2019-10-02", harvest_proxy_window_end="2019-10-31",
+    )
+
+    summary = climate.format_anomaly_summary(anomaly)
+    assert "GDD比 30 年平均高12%" in summary
+    assert "生長季降雨比 30 年平均少20%" in summary
+    assert "非實際採收日" in summary
+    assert "註：" in summary  # 有缺值時要附加缺值說明
+
+
+@pytest.mark.skipif(
+    not (climate.CACHE_DIR / "bordeaux_2019.json").exists()
+    or not (climate.CACHE_DIR / "bordeaux_baseline_1991_2020.json").exists(),
+    reason="需要本機已執行過 --warm-cache-all 或單一產區快取，CI/新 clone 無此檔案",
+)
+def test_Bordeaux_2019_距平為正_已知暖年份的方向性檢查() -> None:
+    season = climate.fetch_season_climate("Bordeaux", 2019)
+    baseline = climate.get_baseline("Bordeaux")
+    anomaly = climate.compute_climate_anomaly(season, baseline)
+    assert anomaly.gdd.pct_anomaly > 0
