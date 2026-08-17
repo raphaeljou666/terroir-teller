@@ -8,8 +8,8 @@ country: "Argentina"
 country_zh: "阿根廷"
 sub_region: "Uco Valley"
 hemisphere: "S"
-latitude: -33.65
-longitude: -69.35
+latitude: -33.58
+longitude: -69.1
 climate_zone: "warm"
 climate_type: "continental"
 topic: "grape_profile"
