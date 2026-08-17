@@ -49,6 +49,33 @@ streamlit run app.py
 
 ---
 
+## 氣候資料的來源與限制
+
+氣候資料全部來自 [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api)，底層是 ECMWF 的 ERA5 重分析資料集。免費、不需 API Key，每日彙總以 UTC 曆日計算。
+
+生長季怎麼取決於半球：北半球是當年 4 月到 10 月，南半球跨年，從前一年 10 月到當年 4 月。所以 Mendoza 的 2019 年份指的是 2018-10 到 2019-04 這一季。
+
+三個要先講清楚的限制：
+
+ERA5 的空間解析度約 25 公里，一個網格點代表的是一整片區域的平均，不是某座葡萄園。在地形破碎的產區這會失真得很明顯——Barolo、Central Otago、Marlborough 抓到的生長季降雨大約是實測站數值的兩倍，因為網格把附近山區的降雨算了進來。溫度受影響較小，但海拔落差大的地方也會偏冷。
+
+好消息是，本專案算的是距平（今年 vs 同一個網格點的 30 年平均），系統性偏差在相減時會抵消掉大半。「這年比平均濕 20%」這種結論仍然站得住腳，但「生長季降雨 742mm」這種絕對值不該當成當地實測值來讀。
+
+第三，30 年基準線用的是 WMO 標準的 1991–2020。這 30 年本身已經被暖化墊高，所以跟更早期的基準線比，距平值會偏保守。
+
+```bash
+# 查單一年份的生長季氣候
+python -m src.climate --region "Bordeaux" --year 2019
+
+# 抓 30 年基準線（第一次會打 API，之後讀 data/cache/）
+python -m src.climate --region "Mendoza" --baseline
+
+# demo 前一次預熱 20 個產區的基準線快取
+python -m src.climate --warm-cache-all
+```
+
+---
+
 ## 文件索引
 
 | 檔案 | 內容 | 適合閱讀時機 |

@@ -106,9 +106,10 @@ terroir-teller/
 │   │       │   └── 05_comparison.md
 │   │       └── ...            # 共 88 則
 │   └── cache/                 # 30 年基準線氣候快取
-│       └── bordeaux_baseline.json
+│       └── bordeaux_baseline_1991_2020.json
 │
 ├── tests/
+│   ├── test_climate.py        # 氣候模組單元測試
 │   └── test_validation.py     # 知名年份驗證測試
 │
 └── docs/                      # 這份文件包（可從本專案目錄搬進來）
