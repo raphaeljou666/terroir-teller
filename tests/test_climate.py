@@ -240,6 +240,44 @@ def test_遇到_429_會等待重試而不是當成參數錯誤放棄(monkeypatch
     assert not responses, "第一次 429 後應該重試第二次"
 
 
+def test_每小時用量上限不重試並拋出可辨識的例外(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 等 65 秒解不了每小時上限，硬重試只是讓 20 個產區各卡三次。
+    calls = {"n": 0}
+
+    def fake_get(*_args: Any, **_kwargs: Any) -> _FakeResponse:
+        calls["n"] += 1
+        return _FakeResponse(429, {"reason": "Hourly API request limit exceeded."})
+
+    monkeypatch.setattr(climate.httpx, "get", fake_get)
+    with pytest.raises(climate.ApiQuotaExceededError) as excinfo:
+        climate._request_archive(44.84, -0.58, date(2019, 4, 1), date(2019, 4, 2))
+
+    assert calls["n"] == 1
+    assert "一小時" in excinfo.value.user_message
+
+
+def test_批次預熱碰到用量上限會停手並標記剩下的產區(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(climate, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(climate, "WARM_CACHE_DELAY_SECONDS", 0.0)
+    calls = {"n": 0}
+
+    def fake_baseline(region_name: str, refresh: bool = False) -> climate.ClimateBaseline:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise climate.ApiQuotaExceededError(climate.USER_MESSAGE_QUOTA_HOUR, "HTTP 429")
+        return climate._assemble_baseline(climate.find_region(region_name), [_fake_season()])
+
+    monkeypatch.setattr(climate, "get_baseline", fake_baseline)
+    results = climate.warm_all_baselines()
+
+    assert len(results) == 20
+    assert calls["n"] == 3, "碰到用量上限就該停手，不該把剩下 17 個產區跑完"
+    assert list(results.values()).count("ok（1 年）") == 2
+    assert all("未抓取" in value for value in list(results.values())[2:])
+
+
 def test_參數錯誤的_4xx_不重試直接拋錯(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
 

@@ -77,6 +77,8 @@ ARCHIVE_LAG_DAYS = 6
 # 給使用者看的統一錯誤訊息（條款 18：使用者看白話、開發者看 log）。
 USER_MESSAGE_API_FAILED = "氣候資料暫時無法取得，請稍後再試一次。"
 USER_MESSAGE_NO_DATA = "這個產區與年份目前查不到氣候資料，請換一個年份看看。"
+USER_MESSAGE_QUOTA_HOUR = "氣候資料服務目前用量已滿，請一小時後再試。"
+USER_MESSAGE_QUOTA_DAY = "氣候資料服務今天的用量已滿，請明天再試。"
 
 
 # --- 例外 -------------------------------------------------------------------
@@ -103,8 +105,22 @@ class RegionNotFoundError(ClimateDataError):
     """查無此產區（不在 `data/regions.json` 的 20 個產區清單內）。"""
 
 
+class ApiQuotaExceededError(ClimateDataError):
+    """已達 Open-Meteo 的每小時或每日用量上限。
+
+    跟一般的暫時性失敗分開，是因為這種情況等幾秒鐘重試沒有意義，呼叫端應該直接停手，
+    而不是硬跑完剩下的產區、每個都卡三次重試。
+    """
+
+
 class _RateLimitedError(Exception):
-    """模組內部用：Open-Meteo 回 429，等一下重試就好，不對外拋出。"""
+    """模組內部用：Open-Meteo 回 429。`retryable` 為 True 時等一下重試就會過。"""
+
+    def __init__(self, reason: str, retryable: bool, user_message: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.retryable = retryable
+        self.user_message = user_message
 
 
 # --- 資料結構 ---------------------------------------------------------------
@@ -342,6 +358,20 @@ def _extract_api_reason(response: httpx.Response) -> str:
         return response.text[:500]
 
 
+def _classify_rate_limit(reason: str) -> _RateLimitedError:
+    """判斷 429 是每分鐘上限（等一下就好）還是每小時／每日上限（等再久也沒用）。
+
+    Open-Meteo 的 429 回應會在 `reason` 裡寫明是哪一種，例如
+    `"Minutely API request limit exceeded. Please try again in one minute."`。
+    """
+    lowered = reason.lower()
+    if "hour" in lowered:
+        return _RateLimitedError(reason, retryable=False, user_message=USER_MESSAGE_QUOTA_HOUR)
+    if "dai" in lowered or "day" in lowered:
+        return _RateLimitedError(reason, retryable=False, user_message=USER_MESSAGE_QUOTA_DAY)
+    return _RateLimitedError(reason, retryable=True, user_message=USER_MESSAGE_API_FAILED)
+
+
 def _request_archive(latitude: float, longitude: float, start: date, end: date) -> dict[str, Any]:
     """實際打一次 Open-Meteo Archive API，含重試與錯誤處理（條款 14）。
 
@@ -374,7 +404,7 @@ def _request_archive(latitude: float, longitude: float, start: date, end: date) 
         try:
             response = httpx.get(ARCHIVE_API_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
             if response.status_code == RATE_LIMIT_STATUS:
-                raise _RateLimitedError(_extract_api_reason(response))
+                raise _classify_rate_limit(_extract_api_reason(response))
             if 400 <= response.status_code < 500:
                 reason = _extract_api_reason(response)
                 logger.error("Open-Meteo 參數錯誤 %s：%s", response.status_code, reason)
@@ -384,10 +414,13 @@ def _request_archive(latitude: float, longitude: float, start: date, end: date) 
             response.raise_for_status()
             payload = response.json()
         except _RateLimitedError as exc:
+            if not exc.retryable:
+                logger.error("Open-Meteo 用量上限，停止重試：%s", exc.reason)
+                raise ApiQuotaExceededError(exc.user_message, f"HTTP 429：{exc.reason}") from exc
             last_error = exc
             logger.warning(
                 "Open-Meteo 已達每分鐘請求上限，等 %.0f 秒後重試（第 %d/%d 次）：%s",
-                RATE_LIMIT_WAIT_SECONDS, attempt, MAX_RETRIES, exc,
+                RATE_LIMIT_WAIT_SECONDS, attempt, MAX_RETRIES, exc.reason,
             )
             if attempt < MAX_RETRIES:
                 time.sleep(RATE_LIMIT_WAIT_SECONDS)
@@ -680,7 +713,9 @@ def _read_baseline_cache(cache_path: Path) -> ClimateBaseline | None:
 def warm_all_baselines(refresh: bool = False) -> dict[str, str]:
     """預熱全部 20 個產區的基準線快取，供 demo 前一次抓好用。
 
-    單一產區失敗不會中斷其他產區，最後統一回報結果。每個產區之間會停
+    單一產區失敗不會中斷其他產區，但碰到每小時／每日用量上限會直接停手——那種情況繼續跑
+    只是讓剩下的產區一個個卡在重試上。實測 Open-Meteo 免費方案一小時大約只夠抓 13–14 個
+    產區的基準線，20 個要分兩次跑。最後統一回報結果。每個產區之間會停
     `WARM_CACHE_DELAY_SECONDS` 秒——一次基準線請求要抓 30 年的每日資料，20 個產區連續打
     會撞上免費方案的每分鐘上限。已經有快取的產區不用等，直接跳過。
 
@@ -690,14 +725,20 @@ def warm_all_baselines(refresh: bool = False) -> dict[str, str]:
     Returns:
         以產區正式名為 key、狀態字串為 value 的 dict（`"ok（30 年）"` 或 `"失敗：..."`）。
     """
+    regions = load_regions()
     results: dict[str, str] = {}
-    for index, region in enumerate(load_regions()):
+    for index, region in enumerate(regions):
         name = region["region_canonical"]
         needs_fetch = refresh or _read_baseline_cache(baseline_cache_path(region)) is None
         if needs_fetch and index > 0:
             time.sleep(WARM_CACHE_DELAY_SECONDS)
         try:
             baseline = get_baseline(name, refresh=refresh)
+        except ApiQuotaExceededError as exc:
+            logger.error("API 用量已達上限，停止預熱：%s", exc.technical_detail)
+            for pending in regions[index:]:
+                results[pending["region_canonical"]] = f"未抓取：{exc.user_message}"
+            break
         except ClimateDataError as exc:
             logger.error("預熱 %s 基準線失敗：%s", name, exc.technical_detail)
             results[name] = f"失敗：{exc.user_message}"
