@@ -136,7 +136,9 @@ def render_label_form() -> tuple[bool, dict[str, Any]]:
         value=form.get("vintage"), step=1,
     )
 
-    st.session_state.label_form = {"region": region, "winery": winery, "vintage": vintage, "grape": grape}
+    st.session_state.label_form = {
+        "region": region, "winery": winery, "vintage": vintage, "grape": grape,
+    }
 
     button_label = "重新分析" if st.session_state.result else "開始分析"
     pressed = st.button(button_label, disabled=not region.strip() or vintage is None)
@@ -196,15 +198,17 @@ def render_charts(gathered: agent.GatheredData) -> None:
     st.subheader("氣候距平圖表")
     year_label = f"{gathered.vintage_year} 年"
 
+    months = comparison["month_label"]
+
     temp_fig = go.Figure()
-    temp_fig.add_trace(go.Scatter(x=comparison["month_label"], y=comparison["temp_mean_vintage"], name=year_label))
-    temp_fig.add_trace(go.Scatter(x=comparison["month_label"], y=comparison["temp_mean_baseline"], name="30 年平均"))
+    temp_fig.add_trace(go.Scatter(x=months, y=comparison["temp_mean_vintage"], name=year_label))
+    temp_fig.add_trace(go.Scatter(x=months, y=comparison["temp_mean_baseline"], name="30 年平均"))
     temp_fig.update_layout(title="每月均溫（該年 vs 30 年平均）", yaxis_title="°C")
     st.plotly_chart(temp_fig, width="stretch")
 
     rain_fig = go.Figure()
-    rain_fig.add_trace(go.Bar(x=comparison["month_label"], y=comparison["precipitation_mm_vintage"], name=year_label))
-    rain_fig.add_trace(go.Bar(x=comparison["month_label"], y=comparison["precipitation_mm_baseline"], name="30 年平均"))
+    rain_fig.add_trace(go.Bar(x=months, y=comparison["precipitation_mm_vintage"], name=year_label))
+    rain_fig.add_trace(go.Bar(x=months, y=comparison["precipitation_mm_baseline"], name="30 年平均"))
     rain_fig.update_layout(title="每月降雨量（該年 vs 30 年平均）", yaxis_title="mm", barmode="group")
     st.plotly_chart(rain_fig, width="stretch")
 

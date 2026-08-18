@@ -349,7 +349,9 @@ _CITATION_RETRY_NUDGE = (
 )
 
 
-def _call_report_llm_once(client: OpenAI, user_message: str, schema: dict[str, Any]) -> dict[str, Any]:
+def _call_report_llm_once(
+    client: OpenAI, user_message: str, schema: dict[str, Any]
+) -> dict[str, Any]:
     """呼叫一次報告生成 LLM，回傳符合 `schema` 的結構化 dict。
 
     用 Structured Outputs（`response_format={"type": "json_schema", ...}` + `strict: True`）
@@ -381,7 +383,9 @@ def _call_report_llm_once(client: OpenAI, user_message: str, schema: dict[str, A
         ) from exc
 
 
-def _generate_structured_body(client: OpenAI, user_message: str, known_ids: set[str]) -> dict[str, Any]:
+def _generate_structured_body(
+    client: OpenAI, user_message: str, known_ids: set[str]
+) -> dict[str, Any]:
     """呼叫報告生成 LLM，必要時重試一次，回傳結構化的三欄位 dict。
 
     Structured Outputs 的 strict 模式不支援 `minItems`，模型仍可能合法地讓每段
@@ -493,7 +497,8 @@ def _ensure_limitation_caveats(limitations: str, region_canonical: str) -> str:
     if "代理" not in result:
         result = f"{_PRE_HARVEST_PROXY_CAVEAT}\n\n{result}".strip()
     if region_canonical in MOUNTAIN_RAINFALL_BIAS_REGIONS and "ERA5" not in result:
-        result = f"{_MOUNTAIN_RAINFALL_CAVEAT_TEMPLATE.format(region=region_canonical)}\n\n{result}".strip()
+        caveat = _MOUNTAIN_RAINFALL_CAVEAT_TEMPLATE.format(region=region_canonical)
+        result = f"{caveat}\n\n{result}".strip()
     return result
 
 

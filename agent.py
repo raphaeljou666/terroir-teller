@@ -361,7 +361,9 @@ def analyze(
 
     if gathered.region_canonical is None:
         logger.error("Agent 迴圈結束但未能確認產區，終止狀態：%s", state)
-        return AnalysisResult(status="error", user_message=USER_MESSAGE_AGENT_FAILED, gathered=gathered)
+        return AnalysisResult(
+            status="error", user_message=USER_MESSAGE_AGENT_FAILED, gathered=gathered
+        )
 
     try:
         markdown = report.generate_report(
@@ -429,7 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     result = analyze(
-        region=args.region, year=args.year, image_path=args.image, max_iterations=args.max_iterations
+        region=args.region, year=args.year, image_path=args.image,
+        max_iterations=args.max_iterations,
     )
 
     if result.status == "ok":
