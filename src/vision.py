@@ -131,8 +131,22 @@ _LABEL_INFO_JSON_SCHEMA = {
 
 _SYSTEM_PROMPT = (
     "你是專業的葡萄酒酒標辨識助手。請仔細判讀圖片中的酒標文字，"
-    "只回傳看得清楚、有把握的資訊；不確定的欄位一律填 null，絕對不要用常識猜測或推論。"
+    "只回傳看得清楚、有把握的資訊；不確定的欄位一律使用 JSON 的 null 值，"
+    "絕對不要用常識猜測或推論，也不要輸出字串 \"null\" 或 \"N/A\" 來代替。"
 )
+
+# 即使 system prompt 已要求，GPT-4o-mini 在 Structured Outputs 的 nullable 欄位
+# （`type: ["string", "null"]`）偶爾還是會選到字串分支、填入字面上的 "null" 文字而不是
+# 真正的 JSON null（實測 12 張酒標中就出現過幾次）。這裡在解析階段做防呆正規化，避免
+# 下游把這個字串誤判成「有辨識出值」，違反條款 15／US-1.2「不確定的欄位是 null」的精神。
+_NULL_LIKE_STRINGS = frozenset({"null", "none", "n/a"})
+
+
+def _normalize_null_like(value: Any) -> Any:
+    """把模型誤填的字串 `"null"`／`"none"`／`"n/a"` 正規化成真正的 `None`。"""
+    if isinstance(value, str) and value.strip().lower() in _NULL_LIKE_STRINGS:
+        return None
+    return value
 
 
 # --- 圖片驗證與編碼 -----------------------------------------------------------
@@ -274,10 +288,10 @@ def recognize_label(image_path: str | Path) -> LabelInfo:
     client = _get_client()
     payload = _call_vision_api(client, path)
     return LabelInfo(
-        region=payload.get("region"),
-        winery=payload.get("winery"),
+        region=_normalize_null_like(payload.get("region")),
+        winery=_normalize_null_like(payload.get("winery")),
         vintage=payload.get("vintage"),
-        grape=payload.get("grape"),
+        grape=_normalize_null_like(payload.get("grape")),
     )
 
 
