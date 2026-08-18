@@ -28,23 +28,43 @@ def _make_hit(chunk_id: str, confidence: str = "high", tags: str = "偏暖, 偏�
     return {"id": chunk_id, "document": "這是知識片段內文。" * 5, "metadata": metadata, "distance": 0.1}
 
 
-# --- _extract_cited_ids ------------------------------------------------------------------
+# --- _collect_cited_ids ------------------------------------------------------------------
 
 
-def test_extract_cited_ids只保留真實存在的id() -> None:
-    body = "偏暖偏乾的年份糖度可能較高 [rule_warm_dry_01]，也可能受到 [made_up_id] 影響。"
-    cited = report._extract_cited_ids(body, {"rule_warm_dry_01"})
+def test_collect_cited_ids只保留真實存在的id() -> None:
+    paragraphs = [
+        {"text": "偏暖偏乾的年份糖度可能較高。", "cited_ids": ["rule_warm_dry_01", "made_up_id"]},
+    ]
+    cited = report._collect_cited_ids(paragraphs, {"rule_warm_dry_01"})
     assert cited == ["rule_warm_dry_01"]
 
 
-def test_extract_cited_ids保留首次出現順序並去重() -> None:
-    body = "[b] 開頭，中間又提到 [a]，最後重複 [b] 一次。"
-    cited = report._extract_cited_ids(body, {"a", "b"})
+def test_collect_cited_ids保留首次出現順序並去重() -> None:
+    paragraphs = [
+        {"text": "第一段。", "cited_ids": ["b"]},
+        {"text": "第二段。", "cited_ids": ["a", "b"]},
+    ]
+    cited = report._collect_cited_ids(paragraphs, {"a", "b"})
     assert cited == ["b", "a"]
 
 
-def test_extract_cited_ids沒有引用時回傳空列表() -> None:
-    assert report._extract_cited_ids("這段沒有任何引用標記。", {"a"}) == []
+def test_collect_cited_ids沒有引用時回傳空列表() -> None:
+    paragraphs = [{"text": "這段沒有任何引用。", "cited_ids": []}]
+    assert report._collect_cited_ids(paragraphs, {"a"}) == []
+
+
+# --- _render_flavor_section ---------------------------------------------------------------
+
+
+def test_render_flavor_section把cited_ids渲染成括號標記() -> None:
+    paragraphs = [{"text": "偏暖偏乾的年份糖度可能較高。", "cited_ids": ["rule_warm_dry_01"]}]
+    section = report._render_flavor_section(paragraphs)
+    assert section == "偏暖偏乾的年份糖度可能較高。 [rule_warm_dry_01]"
+
+
+def test_render_flavor_section沒有引用時不留多餘空白() -> None:
+    paragraphs = [{"text": "這段沒有引用。", "cited_ids": []}]
+    assert report._render_flavor_section(paragraphs) == "這段沒有引用。"
 
 
 # --- _build_sources_section ---------------------------------------------------------------
@@ -74,21 +94,21 @@ def test_build_sources_section完全沒有引用也沒有氣候資料時給出�
 
 
 def test_ensure_limitation_caveats缺少代理值提醒時自動補上() -> None:
-    body = "## 風味推測\n\n內容。\n\n## 氣候摘要\n\n內容。\n\n## 限制說明\n\n目前沒有其他限制。"
-    result = report._ensure_limitation_caveats(body, "Bordeaux")
+    limitations = "目前沒有其他限制。"
+    result = report._ensure_limitation_caveats(limitations, "Bordeaux")
     assert "代理指標" in result
 
 
 def test_ensure_limitation_caveats山區產區缺少ERA5提醒時自動補上() -> None:
-    body = "## 限制說明\n\n這裡已經提到代理指標的限制。"
-    result = report._ensure_limitation_caveats(body, "Barolo")
+    limitations = "這裡已經提到代理指標的限制。"
+    result = report._ensure_limitation_caveats(limitations, "Barolo")
     assert "ERA5" in result
     assert "Barolo" in result
 
 
 def test_ensure_limitation_caveats非山區產區不會被硬塞ERA5提醒() -> None:
-    body = "## 限制說明\n\n這裡已經提到代理指標的限制。"
-    result = report._ensure_limitation_caveats(body, "Bordeaux")
+    limitations = "這裡已經提到代理指標的限制。"
+    result = report._ensure_limitation_caveats(limitations, "Bordeaux")
     assert "ERA5" not in result
 
 
@@ -121,14 +141,23 @@ def test_build_climate_context有資料時帶出具體距平數字() -> None:
 # --- generate_report（LLM 呼叫用 monkeypatch 隔離） -----------------------------------------
 
 
+def _fake_structured_body(
+    flavor_inference: list[dict[str, Any]], climate_summary: str = "2019 年偏暖。",
+    limitations: str = "採收前30天降雨是代理指標，非實際採收日資料。",
+) -> dict[str, Any]:
+    return {
+        "flavor_inference": flavor_inference,
+        "climate_summary": climate_summary,
+        "limitations": limitations,
+    }
+
+
 def test_generate_report組出markdown並附加決定式的資料來源段(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_body = (
-        "## 風味推測\n\n偏暖偏乾的年份糖度可能較高 [rule_warm_dry_01]。\n\n"
-        "## 氣候摘要\n\n2019 年偏暖。\n\n"
-        "## 限制說明\n\n採收前30天降雨是代理指標，非實際採收日資料。"
+    fake_body = _fake_structured_body(
+        [{"text": "偏暖偏乾的年份糖度可能較高。", "cited_ids": ["rule_warm_dry_01"]}]
     )
     monkeypatch.setattr(report, "_get_client", lambda: object())
-    monkeypatch.setattr(report, "_call_report_llm", lambda client, message: fake_body)
+    monkeypatch.setattr(report, "_generate_structured_body", lambda client, message, known_ids: fake_body)
 
     markdown = report.generate_report(
         region_canonical="Bordeaux",
@@ -144,12 +173,11 @@ def test_generate_report組出markdown並附加決定式的資料來源段(monke
 
 
 def test_generate_report過濾模型編造的引用不讓假id出現在資料來源(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_body = (
-        "## 風味推測\n\n這段引用了不存在的片段 [fake_id_not_real]。\n\n"
-        "## 氣候摘要\n\n無資料。\n\n## 限制說明\n\n採收前30天降雨是代理指標。"
+    fake_body = _fake_structured_body(
+        [{"text": "這段引用了不存在的片段。", "cited_ids": ["fake_id_not_real"]}]
     )
     monkeypatch.setattr(report, "_get_client", lambda: object())
-    monkeypatch.setattr(report, "_call_report_llm", lambda client, message: fake_body)
+    monkeypatch.setattr(report, "_generate_structured_body", lambda client, message, known_ids: fake_body)
 
     markdown = report.generate_report(
         region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
@@ -169,3 +197,108 @@ def test_generate_report沒有api_key時拋出ReportGenerationError(monkeypatch:
             region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
             anomaly=None, knowledge_hits=[],
         )
+
+
+# --- _generate_structured_body（重試邏輯） ----------------------------------------------
+
+
+def test_generate_structured_body完全沒有引用且有知識片段時重試一次(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_body = _fake_structured_body([{"text": "沒有引用的段落。", "cited_ids": []}])
+    retried_body = _fake_structured_body(
+        [{"text": "重試後有引用的段落。", "cited_ids": ["rule_warm_dry_01"]}]
+    )
+    calls: list[str] = []
+
+    def fake_call_once(client: Any, message: str, schema: dict[str, Any]) -> dict[str, Any]:
+        calls.append(message)
+        return retried_body if len(calls) > 1 else empty_body
+
+    monkeypatch.setattr(report, "_call_report_llm_once", fake_call_once)
+
+    result = report._generate_structured_body(object(), "使用者訊息", {"rule_warm_dry_01"})
+
+    assert len(calls) == 2
+    assert result == retried_body
+
+
+def test_generate_structured_body重試後仍空就誠實接受不再重試(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_body = _fake_structured_body([{"text": "沒有引用的段落。", "cited_ids": []}])
+    calls: list[str] = []
+
+    def fake_call_once(client: Any, message: str, schema: dict[str, Any]) -> dict[str, Any]:
+        calls.append(message)
+        return empty_body
+
+    monkeypatch.setattr(report, "_call_report_llm_once", fake_call_once)
+
+    result = report._generate_structured_body(object(), "使用者訊息", {"rule_warm_dry_01"})
+
+    assert len(calls) == 2
+    assert result == empty_body
+
+
+def test_generate_structured_body沒有知識片段時空引用不觸發重試(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_body = _fake_structured_body([{"text": "沒有引用的段落。", "cited_ids": []}])
+    calls: list[str] = []
+
+    def fake_call_once(client: Any, message: str, schema: dict[str, Any]) -> dict[str, Any]:
+        calls.append(message)
+        return empty_body
+
+    monkeypatch.setattr(report, "_call_report_llm_once", fake_call_once)
+
+    result = report._generate_structured_body(object(), "使用者訊息", set())
+
+    assert len(calls) == 1
+    assert result == empty_body
+
+
+# --- _call_report_llm_once（API 呼叫與回應解析） -----------------------------------------
+
+
+def test_call_report_llm_once回應無法解析為json時拋出ReportGenerationError(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeMessage:
+        content = "不是合法的 JSON"
+
+    class _FakeChoice:
+        message = _FakeMessage()
+
+    class _FakeResponse:
+        choices = [_FakeChoice()]
+
+    class _FakeCompletions:
+        def create(self, **kwargs: Any) -> _FakeResponse:
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    schema = report._build_report_json_schema({"a"})
+    with pytest.raises(report.ReportGenerationError):
+        report._call_report_llm_once(_FakeClient(), "使用者訊息", schema)
+
+
+# --- _build_report_json_schema -----------------------------------------------------------
+
+
+def test_build_report_json_schema有known_ids時cited_ids用enum限定() -> None:
+    schema = report._build_report_json_schema({"a", "b"})
+    item_schema = schema["schema"]["properties"]["flavor_inference"]["items"]["properties"]["cited_ids"]["items"]
+    assert item_schema["enum"] == ["a", "b"]
+
+
+def test_build_report_json_schema沒有known_ids時不帶enum() -> None:
+    schema = report._build_report_json_schema(set())
+    item_schema = schema["schema"]["properties"]["flavor_inference"]["items"]["properties"]["cited_ids"]["items"]
+    assert "enum" not in item_schema
