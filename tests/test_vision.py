@@ -176,6 +176,31 @@ def test_recognize_label_在回應含null欄位時保留null(monkeypatch: pytest
     )
 
 
+def test_recognize_label_模型誤填字串null時正規化成真正的None(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GPT-4o-mini 在 Structured Outputs 的 nullable 欄位偶爾會填字面字串 "null"／"N/A"
+    而不是真正的 JSON null（實測 12 張酒標中就出現過幾次），這裡驗證 `recognize_label()`
+    有把這種情況正規化成 `None`，不讓下游誤判成「有辨識出值」。
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    monkeypatch.setattr(vision, "load_dotenv", lambda: None)
+    fake_result = {"region": "Bordeaux", "winery": "null", "vintage": 2019, "grape": "N/A"}
+    fake_client = _FakeClient(result=fake_result)
+    monkeypatch.setattr(vision, "OpenAI", lambda timeout=None: fake_client)
+
+    label_info = vision.recognize_label(FIXTURES_DIR / "valid_label.jpg")
+    assert label_info.winery is None, (
+        f"字串 'null' 應被正規化成 None，實際：{label_info.winery!r}"
+    )
+    assert label_info.grape is None, (
+        f"字串 'N/A' 應被正規化成 None，實際：{label_info.grape!r}"
+    )
+    assert label_info.region == "Bordeaux", (
+        f"合法字串值不該被誤正規化掉，實際：{label_info.region!r}"
+    )
+
+
 def test_recognize_label_回應無法解析為JSON時拋出VisionError(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
     monkeypatch.setattr(vision, "load_dotenv", lambda: None)
