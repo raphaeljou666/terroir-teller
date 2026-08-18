@@ -18,6 +18,11 @@ data/cache/*
 data/chroma/*
 !data/chroma/.gitkeep
 
+# 個人測試用酒標照片（不進版控），但 fixtures/ 子目錄的測試合成圖要進版控
+data/test_labels/*
+!data/test_labels/fixtures/
+!data/test_labels/fixtures/**
+
 # IDE
 .vscode/
 .idea/
