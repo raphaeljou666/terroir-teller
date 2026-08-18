@@ -67,8 +67,8 @@
 | ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
 |---|---|---|---|---|---|
 | T-11 | 定義 5 個 function calling tools 的 schema | ✅ 完成 | 2h | T-06~T-10 | JSON schema 符合 OpenAI 規範 |
-| T-12 | 實作 Agent orchestrator（tool routing） | | 4h | T-11 | 能自主呼叫 tools 完成完整流程 |
-| T-13 | 實作風味推測報告生成 prompt | | 3h | T-12 | 報告含推測、限制、來源引用；system prompt 內建下方拒答清單 |
+| T-12 | 實作 Agent orchestrator（tool routing） | ✅ 完成 | 4h | T-11 | 能自主呼叫 tools 完成完整流程 |
+| T-13 | 實作風味推測報告生成 prompt | ✅ 完成 | 3h | T-12 | 報告含推測、限制、來源引用；system prompt 內建下方拒答清單 |
 
 > **T-10／T-11 實作備註**
 >
@@ -93,6 +93,17 @@
 | 8 | 超出 20 產區清單的酒款 | 上傳希臘 Santorini 的酒 | 明確告知不涵蓋此產區，建議手動輸入其他資訊 |
 | 9 | 非葡萄酒酒類 | 清酒、啤酒、烈酒、威士忌 | PRD Non-Goals，v1 僅葡萄酒（呼應條款 4）|
 | 10 | 醫療、酒精攝取建議 | 「懷孕能喝嗎？」 | 一律拒答，建議諮詢專業醫療 |
+
+> **T-12／T-13 實作備註**
+>
+> - 拆成兩階段：`agent.py`（階段一）只做 tool routing 與資料蒐集，system prompt 短而機械化；`src/report.py`（階段二）另外呼叫一次 LLM 生成報告，system prompt 專注在四段結構、保留措辭、引用規則與拒答清單。兩者混在同一個 prompt 容易互相稀釋，分開後各自的 prompt engineering 都更聚焦。
+> - 拒答清單第 8 項不只寫進 prompt，同時在 `agent.py` 的 `_process_tool_calls()` 用程式判斷 `check_region_validity` 回傳的 `valid: False` 立刻中止迴圈——階段二（報告生成）完全不會被呼叫，不是靠模型「選擇不寫」。實測 `--region "Santorini"` 與 `--image data/test_labels/beaujolais.jpg`（Beaujolais 確實不在 20 產區清單／別名內）都會在階段一就優雅收尾，正確印出白話說明並以 exit code 1 結束。
+> - `MAX_ITERATIONS` 定為 6，實測 Bordeaux／Chianti 兩條路徑都在 3–4 輪內完成；用 `--max-iterations 1` 故意逼近上限測試，確認迴圈會優雅收尾——用當輪已蒐集到的（不完整）資料呼叫 `report.generate_report()`，report 會誠實說明「氣候距平資料目前無法取得」而不是編數字，`資料來源` 段落也如實印出「本次報告未能引用任何具體知識庫片段或氣候資料」。
+> - 「資料來源」段落刻意不讓 LLM 生成，改由 `report._build_sources_section()` 從實際檢索到的 metadata 決定式組裝（confidence、sources 都是 frontmatter 原值，不重新評分）；`report._extract_cited_ids()` 會把模型輸出裡出現、但不在檢索結果內的 `[chunk_id]` 標記直接過濾掉並記 log warning，避免假引用流到使用者畫面。
+> - GPT-4o-mini 對「每段都要附引用標記」的指令遵從度不是 100%——同樣的輸入重跑兩次，一次三段都附了引用，一次完全沒附。這是模型能力限制，不是程式邏輯問題；`_extract_cited_ids()`／`_build_sources_section()` 兩種情況都能正確處理（有引用就列出、沒引用就誠實顯示「未能引用」），不會因為模型沒附標記就出錯或幻覺出引用。
+> - 實測發現兩個 humanizer-zh 相關的細節：(1) 沒有明確要求「只用繁體中文」時，GPT-4o-mini 偶爾會夾雜簡體字（如「特征」而非「特徵」），在 system prompt 開頭加一句明確禁止後沒有再出現；(2) system prompt 若沒有限制轉折詞用法，模型容易每段開頭都塞「此外」，加一條「同一份報告最多出現一次」的規則後明顯改善。
+> - ERA5 山區降雨高估的提醒最初用「如果產區是這三個之一」的措辭，模型偶爾會過度聯想到「山」「地形」而對非山區產區（如 Bordeaux）也提起這個說法；改成明確寫「只有『正好』是這三個產區才提，其他任何產區都不要提」後修正。`report._ensure_limitation_caveats()` 仍保留 belt-and-suspenders 的程式碼補句機制，作為 prompt 遵從度不足時的保底。
+> - `src/report.py` 額外提供 `python -m src.report --region --year` 的獨立 CLI，跳過 `agent.py` 的 tool-calling loop、直接用 `climate`／`retrieval` 組資料，方便單獨除錯報告 prompt 的品質。
 
 ### 介面
 
