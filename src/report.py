@@ -8,6 +8,12 @@ tool-calling loop、單獨除錯報告 prompt 的品質。
 四段輸出：風味推測、氣候摘要、限制說明由 LLM 依 system prompt 撰寫；資料來源段落刻意
 不讓 LLM 生成，而是程式碼從實際檢索到的 metadata 決定式組裝——confidence 與出處清單
 已經是結構化事實，讓 LLM 重寫這段只會多一層無謂的幻覺風險（條款 15、17）。
+
+引用機制用 OpenAI Structured Outputs（`response_format={"type": "json_schema", ...}` +
+`strict: True`），仿 `src/vision.py` 的模式：風味推測是 `{text, cited_ids}` 的陣列，
+`cited_ids` 的 schema 用 enum 限定成當次實際檢索到的 chunk id，模型在 schema 層就不可能
+編造引用。`[chunk_id]` 括號標記由程式碼從 `cited_ids` 決定式渲染進最終 Markdown，不再
+依賴模型自己在自由格式散文裡手寫標記——這是修掉早期版本引用遵從度不穩定問題的關鍵。
 """
 
 from __future__ import annotations
@@ -16,7 +22,6 @@ import argparse
 import json
 import logging
 import os
-import re
 from typing import Any
 
 import openai
@@ -40,8 +45,6 @@ MOUNTAIN_RAINFALL_BIAS_REGIONS = frozenset({"Barolo", "Central Otago", "Marlboro
 
 USER_MESSAGE_NO_API_KEY = "系統尚未設定 OpenAI API Key，請聯絡開發者。"
 USER_MESSAGE_GENERATION_FAILED = "報告生成暫時無法使用，請稍後再試一次。"
-
-_CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9_]+)\]")
 
 
 # --- 例外 -----------------------------------------------------------------------
@@ -75,15 +78,16 @@ REPORT_SYSTEM_PROMPT = """\
 
 ## 輸出格式
 
-依序輸出三個標題完全一致的 Markdown 段落，不要輸出其他標題：
+你的輸出是符合系統指定 JSON schema 的結構化資料，有三個欄位：
 
-## 風味推測
-## 氣候摘要
-## 限制說明
+- `flavor_inference`：陣列，依序排列風味推測的每一段。每個元素是 `{"text": ..., "cited_ids": [...]}`，
+  `text` 是這一段的散文內容（不要在 `text` 裡自己寫 `[chunk_id]` 這種括號標記，標記會由
+  系統依 `cited_ids` 自動附加在段落後面，你自己寫會造成重複）。
+- `climate_summary`：一段散文，摘要支撐風味推測的氣候證據。
+- `limitations`：一段散文，說明這份推測的限制。
 
-風味推測放在最前面，因為那是使用者最關心的結論；氣候摘要是支撐這個結論的證據，放在
-後面。絕對不要自己輸出「資料來源」這個標題或任何列出引用清單的段落——那段會由系統在
-你的輸出之後自動附加，你自己加會造成重複。
+風味推測放在最前面，因為那是使用者最關心的結論；氣候摘要是支撐這個結論的證據。不要在
+任何欄位裡提到「資料來源」或列出引用清單——那段由系統在你的輸出之後自動附加。
 
 ## 保留措辭
 
@@ -92,9 +96,11 @@ REPORT_SYSTEM_PROMPT = """\
 
 ## 引用規則
 
-風味推測的每一段只要引用了知識片段的內容，句末要加上 `[chunk_id]` 標記，chunk_id 必須
-是使用者訊息裡「知識庫片段」區塊實際列出的 id，不可以自己編一個。如果某個說法在提供的
-知識片段裡找不到支持，就不要在風味推測寫這個說法，改成在限制說明裡誠實說明依據不足。
+`flavor_inference` 每個段落的 `cited_ids` 只能填使用者訊息裡「知識庫片段」區塊實際列出
+的 id（如果沒有任何片段可用，這裡不會限定，但也不代表你可以自己編一個不存在的 id）。
+只要這一段內容有對應到某個知識片段，就把該片段的 id 填進 `cited_ids`；如果某個說法在
+提供的知識片段裡找不到支持，就不要在風味推測寫這個說法，改成在 `limitations` 裡誠實
+說明依據不足，`cited_ids` 也不要為了湊數而亂填。
 
 ## 信心層級
 
@@ -136,7 +142,7 @@ REPORT_SYSTEM_PROMPT = """\
 痕跡：
 
 - 不要用「專家認為」「研究顯示」這類沒有具體來源的說法，每個論點都要有真正的
-  `[chunk_id]` 支持
+  `cited_ids` 支持
 - 不要每段都湊成三點列舉，兩點或四點都比固定三點自然
 - 不要濫用破折號
 - 不要用粗體字當小標題塞進條列裡
@@ -221,7 +227,7 @@ def _build_knowledge_context(
     """
     if not knowledge_hits:
         return (
-            "沒有檢索到相關的知識庫片段，風味推測段落不能引用任何 [chunk_id]，"
+            "沒有檢索到相關的知識庫片段，風味推測段落的 cited_ids 只能是空陣列，"
             "必須誠實說明目前依據有限。",
             {},
         )
@@ -288,14 +294,71 @@ def _get_client() -> OpenAI:
     return OpenAI(timeout=REQUEST_TIMEOUT_SECONDS)
 
 
-def _call_report_llm(client: OpenAI, user_message: str) -> str:
-    """呼叫報告生成 LLM，回傳三段 Markdown 內文（不含資料來源段落）。
+def _build_report_json_schema(known_ids: set[str]) -> dict[str, Any]:
+    """建立本次呼叫用的 Structured Outputs schema。
 
-    不用 Structured Outputs——輸出是自由格式 Markdown 散文，不是固定 schema，普通 chat
-    completion 就是對的工具。
+    `cited_ids` 的陣列元素用 `enum` 限定成 `known_ids`（當次實際檢索到的 chunk id），
+    模型在 schema 層就不可能編出不存在的 id。`known_ids` 為空集合時（沒有檢索到任何知識
+    片段）改用不帶 `enum` 的簡化 schema——JSON Schema 不允許空陣列的 `enum`。
+
+    Args:
+        known_ids: 當次檢索到、允許被引用的 chunk id 集合。
+
+    Returns:
+        `response_format={"type": "json_schema", "json_schema": ...}` 要用的 schema dict。
+    """
+    cited_id_item: dict[str, Any] = (
+        {"type": "string", "enum": sorted(known_ids)} if known_ids else {"type": "string"}
+    )
+    return {
+        "name": "flavor_report",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "flavor_inference": {
+                    "type": "array",
+                    "description": "風味推測段落，依序排列，每段是一段散文加上該段引用的知識片段 id",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "這一段的散文內容，不含引用標記"},
+                            "cited_ids": {
+                                "type": "array",
+                                "description": "這一段引用的知識片段 id，沒有引用任何片段時為空陣列",
+                                "items": cited_id_item,
+                            },
+                        },
+                        "required": ["text", "cited_ids"],
+                        "additionalProperties": False,
+                    },
+                },
+                "climate_summary": {"type": "string", "description": "支撐風味推測的氣候證據摘要"},
+                "limitations": {"type": "string", "description": "這份推測的限制說明"},
+            },
+            "required": ["flavor_inference", "climate_summary", "limitations"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
+_CITATION_RETRY_NUDGE = (
+    "\n\n（系統提醒：上一次輸出的風味推測段落完全沒有引用任何知識片段 id，但『知識庫片段』"
+    "區塊確實有提供內容。請重新檢查每一段，只要內容對應到某個知識片段就把該片段 id 填進"
+    "cited_ids；真的找不到支持就不要寫進風味推測。）"
+)
+
+
+def _call_report_llm_once(
+    client: OpenAI, user_message: str, schema: dict[str, Any]
+) -> dict[str, Any]:
+    """呼叫一次報告生成 LLM，回傳符合 `schema` 的結構化 dict。
+
+    用 Structured Outputs（`response_format={"type": "json_schema", ...}` + `strict: True`）
+    強制回應符合 schema，跟 `src/vision.py` 的 `_call_vision_api()` 同一套模式。
 
     Raises:
-        ReportGenerationError: API 呼叫失敗。
+        ReportGenerationError: API 呼叫失敗，或回應內容無法解析為合法 JSON。
     """
     try:
         response = client.chat.completions.create(
@@ -304,34 +367,84 @@ def _call_report_llm(client: OpenAI, user_message: str) -> str:
                 {"role": "system", "content": REPORT_SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
+            response_format={"type": "json_schema", "json_schema": schema},
         )
     except openai.OpenAIError as exc:
         logger.error("報告生成 API 呼叫失敗：%s", exc, exc_info=True)
         raise ReportGenerationError(
             USER_MESSAGE_GENERATION_FAILED, f"chat.completions.create() 失敗：{exc!r}"
         ) from exc
-    return response.choices[0].message.content or ""
+
+    try:
+        return json.loads(response.choices[0].message.content)
+    except (json.JSONDecodeError, IndexError, AttributeError, TypeError) as exc:
+        raise ReportGenerationError(
+            USER_MESSAGE_GENERATION_FAILED, f"API 回應無法解析為 JSON：{exc!r}"
+        ) from exc
 
 
-# --- 引用抽取與資料來源組裝 ---------------------------------------------------------
+def _generate_structured_body(
+    client: OpenAI, user_message: str, known_ids: set[str]
+) -> dict[str, Any]:
+    """呼叫報告生成 LLM，必要時重試一次，回傳結構化的三欄位 dict。
 
+    Structured Outputs 的 strict 模式不支援 `minItems`，模型仍可能合法地讓每段
+    `cited_ids` 都是空陣列。如果檢索到的知識片段不是空的、卻完全沒有任何一段引用，
+    重試一次並附上提醒；重試後仍是空的就誠實接受，交給 `_build_sources_section()`
+    的 fallback 顯示「未能引用」，不硬掰。
 
-def _extract_cited_ids(body_markdown: str, known_ids: set[str]) -> list[str]:
-    """抽取 body 內出現過、且確實存在於檢索結果的 `[chunk_id]` 標記，保留首次出現順序。
+    Args:
+        client: 已建立的 OpenAI client。
+        user_message: 組好的 user 訊息。
+        known_ids: 當次檢索到、允許被引用的 chunk id 集合。
 
-    模型手滑編出來、不在檢索結果內的標記直接丟棄並記 log warning，絕不讓假引用流到
-    使用者畫面上。
+    Returns:
+        `{"flavor_inference": [...], "climate_summary": ..., "limitations": ...}`。
     """
-    all_matches = _CITATION_PATTERN.findall(body_markdown)
-    cited: list[str] = []
-    for match in all_matches:
-        if match in known_ids and match not in cited:
-            cited.append(match)
+    schema = _build_report_json_schema(known_ids)
+    body = _call_report_llm_once(client, user_message, schema)
+    if known_ids and all(not p.get("cited_ids") for p in body.get("flavor_inference", [])):
+        logger.warning("風味推測完全沒有引用任何知識片段，重試一次並附上提醒")
+        body = _call_report_llm_once(client, user_message + _CITATION_RETRY_NUDGE, schema)
+    return body
 
-    dropped = set(all_matches) - known_ids
-    if dropped:
-        logger.warning("報告內出現不存在於檢索結果的引用標記，已捨棄：%s", dropped)
+
+# --- 引用收集、渲染與資料來源組裝 ---------------------------------------------------
+
+
+def _collect_cited_ids(paragraphs: list[dict[str, Any]], known_ids: set[str]) -> list[str]:
+    """攤平所有段落的 `cited_ids`，保留首次出現順序、去重，過濾掉不存在於檢索結果的 id。
+
+    Schema 的 `enum` 已經讓模型在正常情況下不可能編出不存在的 id，但 `known_ids` 為空
+    時走的是不帶 `enum` 的簡化 schema，這裡的防禦性過濾仍有意義；不論哪種情況命中，都
+    記 log warning，絕不讓假引用流到使用者畫面上。
+    """
+    cited: list[str] = []
+    unknown: set[str] = set()
+    for para in paragraphs:
+        for chunk_id in para.get("cited_ids", []):
+            if chunk_id in known_ids:
+                if chunk_id not in cited:
+                    cited.append(chunk_id)
+            else:
+                unknown.add(chunk_id)
+
+    if unknown:
+        logger.warning("報告內出現不存在於檢索結果的引用標記，已捨棄：%s", unknown)
     return cited
+
+
+def _render_flavor_section(paragraphs: list[dict[str, Any]]) -> str:
+    """把結構化的段落陣列渲染成風味推測的 Markdown 內文。
+
+    每段 `text` 後面決定式接上 `[id1][id2]` 標記——不再依賴模型自己在散文裡手寫標記。
+    """
+    blocks = []
+    for para in paragraphs:
+        text = para["text"].strip()
+        markers = "".join(f"[{chunk_id}]" for chunk_id in para["cited_ids"])
+        blocks.append(f"{text} {markers}".rstrip() if markers else text)
+    return "\n\n".join(blocks)
 
 
 def _build_sources_section(
@@ -373,27 +486,19 @@ _MOUNTAIN_RAINFALL_CAVEAT_TEMPLATE = (
 )
 
 
-def _append_to_limitations(body_markdown: str, caveat: str) -> str:
-    """把一句提醒插進 `## 限制說明` 段落開頭；該標題不存在時整段補上。"""
-    marker = "## 限制說明"
-    if marker not in body_markdown:
-        return body_markdown.rstrip() + f"\n\n{marker}\n\n{caveat}\n"
-    return body_markdown.replace(marker, f"{marker}\n\n{caveat}", 1)
-
-
-def _ensure_limitation_caveats(body_markdown: str, region_canonical: str) -> str:
+def _ensure_limitation_caveats(limitations: str, region_canonical: str) -> str:
     """防禦性檢查：確認方法論限制的必寫提醒真的出現在限制說明裡，缺席就補上。
 
     這是硬性揭露要求（T-06／T-08 已知限制），單靠 prompt 遵從度有風險，補一行 fallback
-    成本很低（belt-and-suspenders）。
+    成本很低（belt-and-suspenders）。直接對 `limitations` 這個純字串欄位操作，不再需要
+    搜尋 Markdown 標題再插入。
     """
-    result = body_markdown
+    result = limitations
     if "代理" not in result:
-        result = _append_to_limitations(result, _PRE_HARVEST_PROXY_CAVEAT)
+        result = f"{_PRE_HARVEST_PROXY_CAVEAT}\n\n{result}".strip()
     if region_canonical in MOUNTAIN_RAINFALL_BIAS_REGIONS and "ERA5" not in result:
-        result = _append_to_limitations(
-            result, _MOUNTAIN_RAINFALL_CAVEAT_TEMPLATE.format(region=region_canonical)
-        )
+        caveat = _MOUNTAIN_RAINFALL_CAVEAT_TEMPLATE.format(region=region_canonical)
+        result = f"{caveat}\n\n{result}".strip()
     return result
 
 
@@ -431,12 +536,19 @@ def generate_report(
     )
 
     client = _get_client()
-    body = _call_report_llm(client, user_message)
-    body = _ensure_limitation_caveats(body, region_canonical)
+    structured = _generate_structured_body(client, user_message, set(hit_lookup))
 
-    cited_ids = _extract_cited_ids(body, set(hit_lookup))
+    limitations = _ensure_limitation_caveats(structured["limitations"], region_canonical)
+    cited_ids = _collect_cited_ids(structured["flavor_inference"], set(hit_lookup))
     sources_section = _build_sources_section(cited_ids, hit_lookup, anomaly)
-    return f"{body.strip()}\n\n## 資料來源\n\n{sources_section}\n"
+    flavor_section = _render_flavor_section(structured["flavor_inference"])
+
+    return (
+        f"## 風味推測\n\n{flavor_section}\n\n"
+        f"## 氣候摘要\n\n{structured['climate_summary'].strip()}\n\n"
+        f"## 限制說明\n\n{limitations.strip()}\n\n"
+        f"## 資料來源\n\n{sources_section}\n"
+    )
 
 
 # --- CLI ------------------------------------------------------------------------

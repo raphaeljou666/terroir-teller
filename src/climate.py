@@ -1090,6 +1090,105 @@ def format_anomaly_summary(anomaly: ClimateAnomaly) -> str:
     return "\n".join(lines)
 
 
+# --- 逐月比較（T-15 圖表） ----------------------------------------------------
+
+
+def _month_sequence(hemisphere: str) -> list[int]:
+    """依生長季常數推導月份序列，順序是生長季順序，不是日曆 1–12 月。
+
+    直接讀 `NORTHERN_SEASON`／`SOUTHERN_SEASON`（`growing_season_range()` 本身也是讀
+    這兩個常數），不用假造一個參考年份去呼叫 `growing_season_range()` 再取 `.month`。
+    南半球會跨年（例如 10、11、12、1、2、3、4），靠 `% 12` 處理年底到年初的wrap。
+
+    Args:
+        hemisphere: 半球代號，`"N"` 為北半球、`"S"` 為南半球。
+
+    Returns:
+        依生長季順序排列的月份數字列表（1–12）。
+    """
+    (start_month, _), (end_month, _) = (
+        NORTHERN_SEASON if hemisphere.strip().upper() == "N" else SOUTHERN_SEASON
+    )
+    months: list[int] = []
+    month = start_month
+    while True:
+        months.append(month)
+        if month == end_month:
+            return months
+        month = month % 12 + 1
+
+
+def _season_monthly_stats(season: SeasonClimate, *, by_calendar_month: bool = True) -> pd.DataFrame:
+    """把單一生長季的每日資料依月份分組聚合。
+
+    Args:
+        season: 要聚合的生長季氣候資料。
+        by_calendar_month: `True` 時依月份數字（1–12）分組，供跨年份平均使用；`False`
+            時依「YYYY-MM」年月字串分組，保留年份供 `_monthly_table()` 人工除錯。
+
+    Returns:
+        以分組鍵為 index，欄位為 `temp_mean`（月均溫）、`temp_max`（月內最高溫）、
+        `precipitation_mm`（月總降雨）的 DataFrame。
+    """
+    frame = season.to_dataframe()
+    key = frame["date"].dt.month if by_calendar_month else frame["date"].dt.strftime("%Y-%m")
+    return frame.groupby(key).agg(
+        temp_mean=("temp_mean", "mean"),
+        temp_max=("temp_max", "max"),
+        precipitation_mm=("precipitation_mm", "sum"),
+    )
+
+
+def _baseline_monthly_stats(baseline: ClimateBaseline) -> pd.DataFrame:
+    """把 30 年基準線依calendar月份聚合，跨年份平均。
+
+    先用 `_season_monthly_stats()` 算出每一季各自的月均溫／月總降雨，再對這些「每季
+    月統計」取平均——不能直接對攤平的每日資料做「日均降雨」再乘天數，那只有在每個月
+    天數剛好一致時才會巧合對上（現有的生長季常數剛好都不含 2 月，但這是巧合，不該依賴）。
+
+    Args:
+        baseline: 30 年基準線氣候資料。
+
+    Returns:
+        以月份數字（1–12）為 index，欄位為 `temp_mean`（該月均溫的 30 年平均）、
+        `precipitation_mm`（該月總降雨的 30 年平均）的 DataFrame。
+    """
+    per_season = pd.concat(_season_monthly_stats(season) for season in baseline.seasons)
+    return per_season.groupby(per_season.index).agg(
+        temp_mean=("temp_mean", "mean"),
+        precipitation_mm=("precipitation_mm", "mean"),
+    )
+
+
+def build_monthly_comparison(season: SeasonClimate, baseline: ClimateBaseline) -> pd.DataFrame:
+    """把單一年份與 30 年基準線的每月氣候攤成同一張表，供 T-15 圖表使用。
+
+    依生長季順序排列（非日曆 1–12 月）——南半球產區（如 Mendoza、Marlborough）的生長季
+    跨年，若照日曆順序排會從中間斷開，`_month_sequence()` 已處理這個 wrap-around。
+
+    Args:
+        season: 目標年份的生長季氣候資料。
+        baseline: 30 年基準線氣候資料，須與 `season` 是同一產區。
+
+    Returns:
+        每列一個月，依生長季順序排列，欄位為 `month`（月份數字）、`month_label`
+        （例："4月"）、`temp_mean_vintage`／`temp_mean_baseline`（月均溫，該年 vs
+        30 年平均）、`precipitation_mm_vintage`／`precipitation_mm_baseline`（月總
+        降雨，該年 vs 30 年平均）。
+    """
+    months = _month_sequence(season.hemisphere)
+    vintage = _season_monthly_stats(season).reindex(months)
+    base = _baseline_monthly_stats(baseline).reindex(months)
+    return pd.DataFrame({
+        "month": months,
+        "month_label": [f"{m}月" for m in months],
+        "temp_mean_vintage": vintage["temp_mean"].to_numpy(),
+        "temp_mean_baseline": base["temp_mean"].to_numpy(),
+        "precipitation_mm_vintage": vintage["precipitation_mm"].to_numpy(),
+        "precipitation_mm_baseline": base["precipitation_mm"].to_numpy(),
+    })
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -1114,13 +1213,11 @@ def summarise_season(season: SeasonClimate) -> str:
 
 def _monthly_table(season: SeasonClimate) -> str:
     """產出逐月摘要表，方便人工目視檢查半球與日期區間有沒有寫錯。"""
-    frame = season.to_dataframe()
-    frame["月份"] = frame["date"].dt.strftime("%Y-%m")
-    monthly = frame.groupby("月份").agg(
-        平均溫=("temp_mean", "mean"),
-        最高溫=("temp_max", "max"),
-        降雨mm=("precipitation_mm", "sum"),
-    ).round(1)
+    monthly = _season_monthly_stats(season, by_calendar_month=False).round(1)
+    monthly.index.name = "月份"
+    monthly = monthly.rename(
+        columns={"temp_mean": "平均溫", "temp_max": "最高溫", "precipitation_mm": "降雨mm"}
+    )
     return monthly.to_string()
 
 

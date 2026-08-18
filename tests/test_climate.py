@@ -544,3 +544,82 @@ def test_Bordeaux_2019_距平為正_已知暖年份的方向性檢查() -> None:
     baseline = climate.get_baseline("Bordeaux")
     anomaly = climate.compute_climate_anomaly(season, baseline)
     assert anomaly.gdd.pct_anomaly > 0
+
+
+# --- 逐月比較（T-15） --------------------------------------------------------
+
+
+def test_month_sequence北半球從四月排到十月() -> None:
+    assert climate._month_sequence("N") == [4, 5, 6, 7, 8, 9, 10]
+
+
+def test_month_sequence南半球從十月跨年排到四月不從中間斷開() -> None:
+    assert climate._month_sequence("S") == [10, 11, 12, 1, 2, 3, 4]
+
+
+def test_season_monthly_stats依月份數字分組() -> None:
+    season = _make_anomaly_season(
+        2019,
+        ["2019-04-01", "2019-04-02", "2019-05-01"],
+        [10.0, 12.0, 20.0],
+        [1.0, 2.0, 5.0],
+    )
+    stats = climate._season_monthly_stats(season)
+    assert stats.loc[4, "temp_mean"] == pytest.approx(11.0)
+    assert stats.loc[4, "precipitation_mm"] == pytest.approx(3.0)
+    assert stats.loc[5, "temp_mean"] == pytest.approx(20.0)
+
+
+def test_season_monthly_stats依年月字串分組供人工除錯() -> None:
+    season = _make_anomaly_season(2019, ["2019-04-01"], [10.0], [1.0])
+    stats = climate._season_monthly_stats(season, by_calendar_month=False)
+    assert list(stats.index) == ["2019-04"]
+
+
+def test_baseline_monthly_stats對每季的月統計取平均而非日均值() -> None:
+    # 兩個 4 月，天數不同（2 天 vs 3 天）：如果誤用「攤平後對日降雨取平均再乘天數」
+    # 會算錯，正確做法是各自先算「該季 4 月總降雨」再對這兩個數字取平均。
+    season_a = _make_anomaly_season(2019, ["2019-04-01", "2019-04-02"], [10.0, 12.0], [1.0, 1.0])
+    season_b = _make_anomaly_season(
+        2020, ["2020-04-01", "2020-04-02", "2020-04-03"], [14.0, 16.0, 18.0], [3.0, 3.0, 3.0]
+    )
+    baseline = _make_anomaly_baseline([season_a, season_b])
+
+    stats = climate._baseline_monthly_stats(baseline)
+
+    assert stats.loc[4, "precipitation_mm"] == pytest.approx((2.0 + 9.0) / 2)
+    assert stats.loc[4, "temp_mean"] == pytest.approx((11.0 + 16.0) / 2)
+
+
+def test_build_monthly_comparison南半球依生長季順序排列且涵蓋兩個年份(
+) -> None:
+    season = _make_anomaly_season(
+        2019, ["2018-10-01", "2019-04-30"], [15.0, 18.0], [2.0, 3.0], region_name="Mendoza",
+    )
+    baseline = _make_anomaly_baseline(
+        [_make_anomaly_season(
+            2018, ["2017-10-01", "2018-04-30"], [14.0, 17.0], [1.0, 2.0], region_name="Mendoza",
+        )],
+        region_name="Mendoza",
+    )
+
+    comparison = climate.build_monthly_comparison(season, baseline)
+
+    assert list(comparison["month"]) == [10, 11, 12, 1, 2, 3, 4]
+    assert comparison.iloc[0]["month_label"] == "10月"
+    # 10 月與 4 月都有實際資料，中間月份(11~3) 因為沒有每日資料，聚合結果應為 NaN。
+    assert comparison.loc[comparison["month"] == 10, "temp_mean_vintage"].iloc[0] == pytest.approx(15.0)
+    assert comparison.loc[comparison["month"] == 4, "temp_mean_vintage"].iloc[0] == pytest.approx(18.0)
+    assert pd.isna(comparison.loc[comparison["month"] == 12, "temp_mean_vintage"].iloc[0])
+
+
+def test_build_monthly_comparison北半球依生長季順序排列() -> None:
+    season = _make_anomaly_season(2019, ["2019-04-01", "2019-10-31"], [12.0, 16.0], [1.0, 2.0])
+    baseline = _make_anomaly_baseline(
+        [_make_anomaly_season(2018, ["2018-04-01", "2018-10-31"], [11.0, 15.0], [1.0, 2.0])]
+    )
+
+    comparison = climate.build_monthly_comparison(season, baseline)
+
+    assert list(comparison["month"]) == [4, 5, 6, 7, 8, 9, 10]
+    assert comparison.loc[comparison["month"] == 4, "temp_mean_baseline"].iloc[0] == pytest.approx(11.0)

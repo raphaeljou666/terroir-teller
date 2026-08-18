@@ -45,6 +45,8 @@ USER_MESSAGE_REGION_NOT_COVERED_FALLBACK = "本系統目前不涵蓋這個產區
 
 TerminalState = Literal["ok", "region_not_covered", "label_no_region", "max_iterations"]
 
+AnalysisStatus = Literal["ok", "region_not_covered", "label_no_region", "error"]
+
 
 # --- 例外 -------------------------------------------------------------------
 
@@ -82,6 +84,25 @@ class GatheredData:
     anomaly: dict[str, Any] | None = None
     knowledge_hits: list[dict[str, Any]] = field(default_factory=list)
     tool_call_log: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class AnalysisResult:
+    """`analyze()` 的回傳結果，CLI 與 Streamlit（`app.py`）共用同一份資料結構。
+
+    Attributes:
+        status: 分析結果狀態。`"max_iterations"` 不是獨立狀態——迴圈輪數用盡時仍會嘗試
+            用已蒐集的（不完整）資料生成報告，成功就是 `"ok"`，跟正常流程一樣。
+        markdown: 成功時的報告全文，非成功時為 `None`。
+        user_message: 非成功時給使用者看的白話說明，成功時為 `None`。
+        gathered: 迴圈蒐集到的資料，圖表與辨識結果 UI 都要用到；`AgentError` 發生在
+            拿到 client 之前，沒有蒐集到任何資料，此時為預設空的 `GatheredData()`。
+    """
+
+    status: AnalysisStatus
+    markdown: str | None = None
+    user_message: str | None = None
+    gathered: GatheredData = field(default_factory=GatheredData)
 
 
 # --- Orchestrator system prompt -------------------------------------------------
@@ -266,20 +287,101 @@ def run_agent_loop(
     return gathered, "max_iterations"
 
 
-# --- CLI ------------------------------------------------------------------------
+# --- 任務訊息組裝 -----------------------------------------------------------------
 
 
-def build_user_task_message(args: argparse.Namespace) -> str:
-    """依 CLI 輸入方式（`--image` 或 `--region`/`--year`）組出 orchestrator 的任務描述。"""
-    if args.image:
+def _build_task_message(*, image_path: str | None, region: str | None, year: int | None) -> str:
+    """組出 orchestrator 的任務描述，`analyze()` 與 CLI 共用同一份邏輯。"""
+    if image_path:
         return (
-            f"使用者上傳了一張酒標照片，路徑是「{args.image}」。"
+            f"使用者上傳了一張酒標照片，路徑是「{image_path}」。"
             "請先辨識酒標，再依標準流程確認產區合法性、查詢氣候距平與相關知識庫片段。"
         )
     return (
-        f"使用者想了解 {args.region} 產區 {args.year} 年份的葡萄酒。"
+        f"使用者想了解 {region} 產區 {year} 年份的葡萄酒。"
         "請依標準流程確認產區合法性、查詢氣候距平與相關知識庫片段。"
     )
+
+
+def build_user_task_message(args: argparse.Namespace) -> str:
+    """CLI 專用的薄包裝，依 `--image` 或 `--region`/`--year` 組出任務描述。"""
+    return _build_task_message(image_path=args.image, region=args.region, year=args.year)
+
+
+def _terminal_state_message(gathered: GatheredData, state: TerminalState) -> str:
+    """組出 `region_not_covered`／`label_no_region` 終止狀態的白話說明。"""
+    if state == "region_not_covered":
+        return (
+            gathered.region_validity.get("reason")
+            if gathered.region_validity else USER_MESSAGE_REGION_NOT_COVERED_FALLBACK
+        )
+    return USER_MESSAGE_NO_REGION_FROM_LABEL
+
+
+# --- 對外分析函式（CLI 與 Streamlit 共用） -------------------------------------------
+
+
+def analyze(
+    *,
+    region: str | None = None,
+    year: int | None = None,
+    image_path: str | None = None,
+    label_info: dict[str, Any] | None = None,
+    max_iterations: int = MAX_ITERATIONS,
+) -> AnalysisResult:
+    """跑完整的資料蒐集＋報告生成流程，回傳結構化結果供 CLI 與 Streamlit 共用。
+
+    跟 CLI 的 `--image` 路徑不同，這裡的 `label_info` 允許呼叫端（例如 Streamlit 在
+    「辨識結果確認」步驟自己呼叫過 `vision.recognize_label()` 之後）直接把已確認／
+    已編輯的酒莊、品種等資訊帶進報告生成，不需要透過 `image_path` 讓 agent loop 重跑
+    一次辨識——`label_info` 優先於 agent loop 自己蒐集到的 `gathered.label_info`。
+
+    Args:
+        region: 產區名稱或別名，需與 `year` 成對提供。
+        year: 酒標年份，需與 `region` 成對提供。
+        image_path: 酒標照片的本機路徑，與 `region`/`year` 二擇一。
+        label_info: 已確認的酒標辨識結果（酒莊、品種等），優先於 agent loop 蒐集到的版本。
+        max_iterations: Agent tool-calling 迴圈的最大輪數上限。
+
+    Returns:
+        `AnalysisResult`，`status="ok"` 時 `markdown` 有值，其餘狀態 `user_message` 有值。
+    """
+    task_message = _build_task_message(image_path=image_path, region=region, year=year)
+    try:
+        client = _get_client()
+        gathered, state = run_agent_loop(client, task_message, max_iterations)
+    except AgentError as exc:
+        logger.error("技術細節：%s", exc.technical_detail)
+        return AnalysisResult(status="error", user_message=exc.user_message)
+
+    if state in ("region_not_covered", "label_no_region"):
+        return AnalysisResult(
+            status=state, user_message=_terminal_state_message(gathered, state), gathered=gathered
+        )
+
+    if gathered.region_canonical is None:
+        logger.error("Agent 迴圈結束但未能確認產區，終止狀態：%s", state)
+        return AnalysisResult(
+            status="error", user_message=USER_MESSAGE_AGENT_FAILED, gathered=gathered
+        )
+
+    try:
+        markdown = report.generate_report(
+            region_canonical=gathered.region_canonical,
+            region_zh=gathered.region_zh,
+            vintage_year=gathered.vintage_year,
+            anomaly=gathered.anomaly,
+            knowledge_hits=gathered.knowledge_hits,
+            label_info=label_info or gathered.label_info,
+        )
+    except report.ReportGenerationError as exc:
+        logger.error("技術細節：%s", exc.technical_detail)
+        return AnalysisResult(status="error", user_message=exc.user_message, gathered=gathered)
+
+    return AnalysisResult(status="ok", markdown=markdown, gathered=gathered)
+
+
+# --- CLI ------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -307,20 +409,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--region 與 --year 必須一起提供")
 
 
-def _print_terminal_state_message(gathered: GatheredData, state: TerminalState) -> None:
-    """印出 `region_not_covered`／`label_no_region` 終止狀態的白話說明。"""
-    if state == "region_not_covered":
-        reason = (
-            gathered.region_validity.get("reason")
-            if gathered.region_validity else USER_MESSAGE_REGION_NOT_COVERED_FALLBACK
-        )
-        print(f"\n{reason}")
-    elif state == "label_no_region":
-        print(f"\n{USER_MESSAGE_NO_REGION_FROM_LABEL}")
-
-
 def main(argv: list[str] | None = None) -> int:
-    """CLI 進入點。
+    """CLI 進入點：解析與驗證參數後委派給 `analyze()`，只負責印出結果與決定退出碼。
 
     Args:
         argv: 命令列參數；`None` 表示直接讀 `sys.argv`。
@@ -340,40 +430,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 2
 
-    try:
-        client = _get_client()
-        gathered, state = run_agent_loop(client, build_user_task_message(args), args.max_iterations)
-    except AgentError as exc:
-        # 條款 18：使用者只看到白話訊息，技術細節寫進 log。
-        logger.error("技術細節：%s", exc.technical_detail)
-        print(f"\n{exc.user_message}")
-        return 1
+    result = analyze(
+        region=args.region, year=args.year, image_path=args.image,
+        max_iterations=args.max_iterations,
+    )
 
-    if state in ("region_not_covered", "label_no_region"):
-        _print_terminal_state_message(gathered, state)
-        return 1
+    if result.status == "ok":
+        print(result.markdown)
+        return 0
 
-    if gathered.region_canonical is None:
-        logger.error("Agent 迴圈結束但未能確認產區，終止狀態：%s", state)
-        print(f"\n{USER_MESSAGE_AGENT_FAILED}")
-        return 1
-
-    try:
-        markdown = report.generate_report(
-            region_canonical=gathered.region_canonical,
-            region_zh=gathered.region_zh,
-            vintage_year=gathered.vintage_year,
-            anomaly=gathered.anomaly,
-            knowledge_hits=gathered.knowledge_hits,
-            label_info=gathered.label_info,
-        )
-    except report.ReportGenerationError as exc:
-        logger.error("技術細節：%s", exc.technical_detail)
-        print(f"\n{exc.user_message}")
-        return 1
-
-    print(markdown)
-    return 0
+    print(f"\n{result.user_message}")
+    return 1
 
 
 if __name__ == "__main__":

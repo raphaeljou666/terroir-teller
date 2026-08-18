@@ -99,30 +99,83 @@
 > - 拆成兩階段：`agent.py`（階段一）只做 tool routing 與資料蒐集，system prompt 短而機械化；`src/report.py`（階段二）另外呼叫一次 LLM 生成報告，system prompt 專注在四段結構、保留措辭、引用規則與拒答清單。兩者混在同一個 prompt 容易互相稀釋，分開後各自的 prompt engineering 都更聚焦。
 > - 拒答清單第 8 項不只寫進 prompt，同時在 `agent.py` 的 `_process_tool_calls()` 用程式判斷 `check_region_validity` 回傳的 `valid: False` 立刻中止迴圈——階段二（報告生成）完全不會被呼叫，不是靠模型「選擇不寫」。實測 `--region "Santorini"` 與 `--image data/test_labels/beaujolais.jpg`（Beaujolais 確實不在 20 產區清單／別名內）都會在階段一就優雅收尾，正確印出白話說明並以 exit code 1 結束。
 > - `MAX_ITERATIONS` 定為 6，實測 Bordeaux／Chianti 兩條路徑都在 3–4 輪內完成；用 `--max-iterations 1` 故意逼近上限測試，確認迴圈會優雅收尾——用當輪已蒐集到的（不完整）資料呼叫 `report.generate_report()`，report 會誠實說明「氣候距平資料目前無法取得」而不是編數字，`資料來源` 段落也如實印出「本次報告未能引用任何具體知識庫片段或氣候資料」。
-> - 「資料來源」段落刻意不讓 LLM 生成，改由 `report._build_sources_section()` 從實際檢索到的 metadata 決定式組裝（confidence、sources 都是 frontmatter 原值，不重新評分）；`report._extract_cited_ids()` 會把模型輸出裡出現、但不在檢索結果內的 `[chunk_id]` 標記直接過濾掉並記 log warning，避免假引用流到使用者畫面。
-> - GPT-4o-mini 對「每段都要附引用標記」的指令遵從度不是 100%——同樣的輸入重跑兩次，一次三段都附了引用，一次完全沒附。這是模型能力限制，不是程式邏輯問題；`_extract_cited_ids()`／`_build_sources_section()` 兩種情況都能正確處理（有引用就列出、沒引用就誠實顯示「未能引用」），不會因為模型沒附標記就出錯或幻覺出引用。
+> - 「資料來源」段落刻意不讓 LLM 生成，改由 `report._build_sources_section()` 從實際檢索到的 metadata 決定式組裝（confidence、sources 都是 frontmatter 原值，不重新評分）；`report._collect_cited_ids()` 會把不在檢索結果內的引用 id 直接過濾掉並記 log warning，避免假引用流到使用者畫面。
+> - GPT-4o-mini 對「每段都要附引用標記」的指令遵從度最初不是 100%——同樣的輸入重跑兩次，一次三段都附了引用，一次完全沒附。這是模型能力限制，不是程式邏輯問題；當時的 `_extract_cited_ids()`／`_build_sources_section()` 兩種情況都能正確處理（有引用就列出、沒引用就誠實顯示「未能引用」），不會因為模型沒附標記就出錯或幻覺出引用，但「沒引用」發生的頻率本身牴觸 PRD「可解釋性 100% 有引用來源」的成功指標，動 T-14 UI 之前先修掉（見下方新增備註）。
+> - **引用機制修正（動 T-14/T-15 前）**：把自由格式 Markdown＋regex 撈 `[chunk_id]` 的作法，改成仿 `src/vision.py` 的 OpenAI Structured Outputs 模式——`report._call_report_llm_once()` 用 `response_format={"type": "json_schema", ...}` + `strict: True` 逼模型輸出 `{flavor_inference: [{text, cited_ids}], climate_summary, limitations}`，`cited_ids` 的陣列元素用 `enum` 限定成當次實際檢索到的 chunk id，模型在 schema 層就不可能編造引用（`knowledge_hits` 為空時 `enum` 會是空陣列而不合法，改用不帶 `enum` 的簡化 schema）。`[chunk_id]` 括號標記改由 `report._render_flavor_section()` 依 `cited_ids` 決定式渲染進最終 Markdown，不再依賴模型自己在散文裡手寫——這才是真正修掉遵從度問題的關鍵，不只是把驗證挪到 schema 層。Strict 模式不支援 `minItems`，模型仍可能合法讓每段 `cited_ids` 都是空陣列，`report._generate_structured_body()` 加了一次性重試（`known_ids` 非空但全段都沒引用時，帶提醒重新呼叫一次），重試後仍空就誠實接受、不硬掰。原本 regex 版的 `_extract_cited_ids()` 退場，換成在結構化陣列上做事的 `_collect_cited_ids()`；`_ensure_limitation_caveats()` 也從搜尋 Markdown 標題插入字串，簡化成直接對 `limitations` 純字串欄位操作。實測連續跑 5 次 `python -m src.report --region "Bordeaux" --year 2019`，每次「風味推測」都有引用標記、「資料來源」都有實際條目，不再有「一次全附、一次全無」的不穩定情況。
 > - 實測發現兩個 humanizer-zh 相關的細節：(1) 沒有明確要求「只用繁體中文」時，GPT-4o-mini 偶爾會夾雜簡體字（如「特征」而非「特徵」），在 system prompt 開頭加一句明確禁止後沒有再出現；(2) system prompt 若沒有限制轉折詞用法，模型容易每段開頭都塞「此外」，加一條「同一份報告最多出現一次」的規則後明顯改善。
 > - ERA5 山區降雨高估的提醒最初用「如果產區是這三個之一」的措辭，模型偶爾會過度聯想到「山」「地形」而對非山區產區（如 Bordeaux）也提起這個說法；改成明確寫「只有『正好』是這三個產區才提，其他任何產區都不要提」後修正。`report._ensure_limitation_caveats()` 仍保留 belt-and-suspenders 的程式碼補句機制，作為 prompt 遵從度不足時的保底。
 > - `src/report.py` 額外提供 `python -m src.report --region --year` 的獨立 CLI，跳過 `agent.py` 的 tool-calling loop、直接用 `climate`／`retrieval` 組資料，方便單獨除錯報告 prompt 的品質。
 
 ### 介面
 
-| ID | 任務 | 預估 | 依賴 | 驗收條件 |
-|---|---|---|---|---|
-| T-14 | 建立 Streamlit 主頁面（上傳→報告） | 4h | T-12 | 完整流程可用 |
-| T-15 | 加入氣候距平視覺化圖表 | 2h | T-14 | 折線圖+柱狀圖顯示對比 |
+| ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
+|---|---|---|---|---|---|
+| T-14 | 建立 Streamlit 主頁面（上傳→報告） | ✅ 完成 | 4h | T-12 | 完整流程可用 |
+| T-15 | 加入氣候距平視覺化圖表 | ✅ 完成 | 2h | T-14 | 折線圖+柱狀圖顯示對比 |
+
+> **T-14／T-15 實作備註**
+>
+> - `app.py` 放根目錄（跟 `agent.py` 同層）。動 UI 前先把 `agent.py` 的 `main()` 拆出
+>   `analyze()`（回傳結構化的 `AnalysisResult`，不直接 `print()`），CLI 與 Streamlit 共用
+>   同一套「跑迴圈→判斷終止狀態→生成報告」邏輯，產區越界之類的分支不用寫兩次。
+> - 上傳圖片走「UI 層直接呼叫 `vision.recognize_label()` 取得可編輯表單 → 確認／編輯後
+>   用 `region`／`year` 呼叫 `agent.analyze()`」，刻意不透過 `agent.analyze(image_path=...)`
+>   ——後者會讓 agent 自己的 tool-calling loop 再跑一次辨識，等於同一張圖片辨識兩次、多燒
+>   一次 API 額度。副作用是 agent loop 自己蒐集到的 `gathered.label_info` 永遠是 `None`（
+>   因為沒有走 image_path 路徑），`analyze()` 因此多一個 `label_info` 參數，UI 端把已確認
+>   的酒莊／品種資訊直接帶進去，優先於 `gathered.label_info`——不然這條路徑會讓酒莊／品種
+>   資訊憑空消失，`report.generate_report()` 確實有用到這兩個欄位。
+> - Streamlit 每次互動都整支腳本重跑，圖片辨識與 `agent.analyze()` 都只掛在按鈕點擊／
+>   偵測到新檔案時才執行，用 `st.session_state` 存結果，避免使用者編輯任一欄位就重新觸發
+>   付費 API（`06_TechSetup.md` §11 踩雷點）。新圖片判斷用 `UploadedFile.file_id` 比對，
+>   不是內容雜湊——Streamlit 專門為此設計的識別碼，比自己 hash 圖片位元組更輕量。用
+>   Streamlit 的 `AppTest` 框架（不用真的開瀏覽器）驗證過：編輯表單欄位觸發的 rerun 不會
+>   再打任何 OpenAI API。
+> - 實測發現一個真的會讓畫面變成 stack trace 的雷：`st.image()` 顯示縮圖如果放在格式／
+>   大小驗證**之前**，遇到內容無法解碼的檔案（例如副檔名是 `.jpg` 但內容不是合法圖片）
+>   會直接拋 `UnidentifiedImageError` 讓整頁掛掉，牴觸條款 18／US-4.1「不會白畫面」的
+>   要求。修法：驗證（副檔名、大小）先做完，`st.image()` 本身也包 `try/except`，捕捉到
+>   解碼失敗一律轉成「格式看起來不是 JPG 或 PNG」的白話提示。
+> - 產區欄位用純文字輸入框，刻意不做下拉選單限定 20 個產區——那樣會讓「輸入不在清單內
+>   的產區」這條路徑在表單層就永遠無法觸發，等於悄悄拿掉 T-17 明確要測的手動輸入 fallback
+>   行為。改用 `st.expander` 列出 20 個支援產區當輕量提示。
+> - 手動輸入 fallback（T-17）不是獨立模式，是同一份表單：酒標辨識完全失敗、辨識不出
+>   產區、或使用者根本沒上傳圖片，欄位就是空的，直接打字即可。實測 `chianti.jpg`（能
+>   辨識出 `Chianti Classico`，透過既有的別名比對正確解析成 `Chianti`）、`beaujolais.jpg`
+>   與 `idontknow.jpg`（後者實際辨識出一個不在 20 產區清單內的產區，跟預期的「完全辨識
+>   不出」不同，但結果一樣——`region_not_covered` 分支正確顯示白話說明、表單保留可編輯、
+>   不是白畫面）都通過。
+> - `climate.build_monthly_comparison()` 依生長季順序（不是日曆 1–12 月）排列月份，靠
+>   `_month_sequence()` 直接讀 `NORTHERN_SEASON`／`SOUTHERN_SEASON` 常數推導、用 `% 12`
+>   處理南半球跨年 wrap-around；基準線的月統計刻意先算「每季各自的月加總／月均溫」再對
+>   這些數字取平均，不是對攤平後的每日資料直接做「日均降雨」——後者只有在每個月天數剛好
+>   一致時才會巧合對上。實測 Mendoza（10 月排到隔年 4 月）與 Bordeaux（4 月排到 10 月）
+>   都正確、沒有從中間斷開。Barolo／Central Otago／Marlborough 的降雨柱狀圖下方固定加一行
+>   ERA5 山區降雨高估的 caption，常數直接從 `report.MOUNTAIN_RAINFALL_BIAS_REGIONS` 匯入，
+>   不重複定義產區清單。
+> - **手機實測（條款 31）**：用真的手機連區網 IP 走完一輪，拍照入口正常叫出相機、版面不需
+>   橫向捲動；兩張不在 20 產區清單內的酒標都正確擋下並保留表單可改，最後用 Chianti 酒標完整
+>   跑通辨識與風味分析。環境前提記一下，這兩點實際卡住過：WSL2 要設 `networkingMode=mirrored`
+>   （`.wslconfig`），且 Windows 防火牆要放行 TCP 8501 的對內連線，否則手機連不到。
+> - **待辦：手機拍照到辨識結果偏慢**（實測 `vision.py` 有觸發「超過 US-1.2 的 5 秒目標」的 log
+>   warning）。成因不是模型慢，是 `_encode_image_data_url()` 直接把原圖 `read_bytes()` 後
+>   base64——手機原圖動輒 3–5MB／3000×4000，編碼後變 4–6.7MB 整份送進 OpenAI，而 Vision API
+>   本來就會把圖縮到 2048 內、短邊 768 再切 512px tile，送超過這個尺寸的部分純屬浪費上傳時間
+>   與 image token。**列入下一輪打磨處理，本輪不修**（條款 30：先確保端到端能跑，再回頭優化）。
+>   另外注意 `_call_vision_api()` 的 `started = time.perf_counter()` 目前設在 encode 之後，
+>   5 秒目標的量測沒把編碼時間算進去，改善幅度會被低估。
 
 ---
 
 ## P1 任務（加分項）
 
-| ID | 任務 | 預估 | 依賴 | 驗收條件 |
-|---|---|---|---|---|
-| T-16 | 知名年份驗證測試（3–5 案例） | 3h | T-13 | 產出驗證報告 Markdown |
-| T-17 | 手動輸入 fallback 介面 | 1h | T-14 | Vision 失敗時可切換手動 |
-| T-18 | 錯誤處理與 loading 狀態優化 | 2h | T-14 | 各種例外都有友善訊息 |
-| T-19 | 一鍵匯出報告為 Markdown | 1h | T-14 | 下載按鈕產生 .md 檔 |
-| T-20 | README 撰寫（含 demo 截圖、方法論限制） | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
+| ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
+|---|---|---|---|---|---|
+| T-16 | 知名年份驗證測試（3–5 案例） | | 3h | T-13 | 產出驗證報告 Markdown |
+| T-17 | 手動輸入 fallback 介面 | ✅ 完成 | 1h | T-14 | Vision 失敗時可切換手動 |
+| T-18 | 錯誤處理與 loading 狀態優化 | | 2h | T-14 | 各種例外都有友善訊息 |
+| T-19 | 一鍵匯出報告為 Markdown | | 1h | T-14 | 下載按鈕產生 .md 檔 |
+| T-20 | README 撰寫（含 demo 截圖、方法論限制） | | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
 
 ---
 

@@ -54,6 +54,8 @@ httpx>=0.27.0
 pandas>=2.2.0
 plotly>=5.24.0
 pillow>=10.4.0
+pyyaml>=6.0
+pytest>=8.3.0
 ```
 
 **白話說明**：
@@ -65,6 +67,8 @@ pillow>=10.4.0
 - `pandas`：處理氣候資料表格
 - `plotly`：畫氣候距平圖表
 - `pillow`：處理上傳圖片
+- `pyyaml`：解析知識庫檔案的 YAML frontmatter
+- `pytest`：跑離線測試
 
 ---
 
