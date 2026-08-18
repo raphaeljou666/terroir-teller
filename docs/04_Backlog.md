@@ -108,22 +108,63 @@
 
 ### 介面
 
-| ID | 任務 | 預估 | 依賴 | 驗收條件 |
-|---|---|---|---|---|
-| T-14 | 建立 Streamlit 主頁面（上傳→報告） | 4h | T-12 | 完整流程可用 |
-| T-15 | 加入氣候距平視覺化圖表 | 2h | T-14 | 折線圖+柱狀圖顯示對比 |
+| ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
+|---|---|---|---|---|---|
+| T-14 | 建立 Streamlit 主頁面（上傳→報告） | ✅ 完成 | 4h | T-12 | 完整流程可用 |
+| T-15 | 加入氣候距平視覺化圖表 | ✅ 完成 | 2h | T-14 | 折線圖+柱狀圖顯示對比 |
+
+> **T-14／T-15 實作備註**
+>
+> - `app.py` 放根目錄（跟 `agent.py` 同層）。動 UI 前先把 `agent.py` 的 `main()` 拆出
+>   `analyze()`（回傳結構化的 `AnalysisResult`，不直接 `print()`），CLI 與 Streamlit 共用
+>   同一套「跑迴圈→判斷終止狀態→生成報告」邏輯，產區越界之類的分支不用寫兩次。
+> - 上傳圖片走「UI 層直接呼叫 `vision.recognize_label()` 取得可編輯表單 → 確認／編輯後
+>   用 `region`／`year` 呼叫 `agent.analyze()`」，刻意不透過 `agent.analyze(image_path=...)`
+>   ——後者會讓 agent 自己的 tool-calling loop 再跑一次辨識，等於同一張圖片辨識兩次、多燒
+>   一次 API 額度。副作用是 agent loop 自己蒐集到的 `gathered.label_info` 永遠是 `None`（
+>   因為沒有走 image_path 路徑），`analyze()` 因此多一個 `label_info` 參數，UI 端把已確認
+>   的酒莊／品種資訊直接帶進去，優先於 `gathered.label_info`——不然這條路徑會讓酒莊／品種
+>   資訊憑空消失，`report.generate_report()` 確實有用到這兩個欄位。
+> - Streamlit 每次互動都整支腳本重跑，圖片辨識與 `agent.analyze()` 都只掛在按鈕點擊／
+>   偵測到新檔案時才執行，用 `st.session_state` 存結果，避免使用者編輯任一欄位就重新觸發
+>   付費 API（`06_TechSetup.md` §11 踩雷點）。新圖片判斷用 `UploadedFile.file_id` 比對，
+>   不是內容雜湊——Streamlit 專門為此設計的識別碼，比自己 hash 圖片位元組更輕量。用
+>   Streamlit 的 `AppTest` 框架（不用真的開瀏覽器）驗證過：編輯表單欄位觸發的 rerun 不會
+>   再打任何 OpenAI API。
+> - 實測發現一個真的會讓畫面變成 stack trace 的雷：`st.image()` 顯示縮圖如果放在格式／
+>   大小驗證**之前**，遇到內容無法解碼的檔案（例如副檔名是 `.jpg` 但內容不是合法圖片）
+>   會直接拋 `UnidentifiedImageError` 讓整頁掛掉，牴觸條款 18／US-4.1「不會白畫面」的
+>   要求。修法：驗證（副檔名、大小）先做完，`st.image()` 本身也包 `try/except`，捕捉到
+>   解碼失敗一律轉成「格式看起來不是 JPG 或 PNG」的白話提示。
+> - 產區欄位用純文字輸入框，刻意不做下拉選單限定 20 個產區——那樣會讓「輸入不在清單內
+>   的產區」這條路徑在表單層就永遠無法觸發，等於悄悄拿掉 T-17 明確要測的手動輸入 fallback
+>   行為。改用 `st.expander` 列出 20 個支援產區當輕量提示。
+> - 手動輸入 fallback（T-17）不是獨立模式，是同一份表單：酒標辨識完全失敗、辨識不出
+>   產區、或使用者根本沒上傳圖片，欄位就是空的，直接打字即可。實測 `chianti.jpg`（能
+>   辨識出 `Chianti Classico`，透過既有的別名比對正確解析成 `Chianti`）、`beaujolais.jpg`
+>   與 `idontknow.jpg`（後者實際辨識出一個不在 20 產區清單內的產區，跟預期的「完全辨識
+>   不出」不同，但結果一樣——`region_not_covered` 分支正確顯示白話說明、表單保留可編輯、
+>   不是白畫面）都通過。
+> - `climate.build_monthly_comparison()` 依生長季順序（不是日曆 1–12 月）排列月份，靠
+>   `_month_sequence()` 直接讀 `NORTHERN_SEASON`／`SOUTHERN_SEASON` 常數推導、用 `% 12`
+>   處理南半球跨年 wrap-around；基準線的月統計刻意先算「每季各自的月加總／月均溫」再對
+>   這些數字取平均，不是對攤平後的每日資料直接做「日均降雨」——後者只有在每個月天數剛好
+>   一致時才會巧合對上。實測 Mendoza（10 月排到隔年 4 月）與 Bordeaux（4 月排到 10 月）
+>   都正確、沒有從中間斷開。Barolo／Central Otago／Marlborough 的降雨柱狀圖下方固定加一行
+>   ERA5 山區降雨高估的 caption，常數直接從 `report.MOUNTAIN_RAINFALL_BIAS_REGIONS` 匯入，
+>   不重複定義產區清單。
 
 ---
 
 ## P1 任務（加分項）
 
-| ID | 任務 | 預估 | 依賴 | 驗收條件 |
-|---|---|---|---|---|
-| T-16 | 知名年份驗證測試（3–5 案例） | 3h | T-13 | 產出驗證報告 Markdown |
-| T-17 | 手動輸入 fallback 介面 | 1h | T-14 | Vision 失敗時可切換手動 |
-| T-18 | 錯誤處理與 loading 狀態優化 | 2h | T-14 | 各種例外都有友善訊息 |
-| T-19 | 一鍵匯出報告為 Markdown | 1h | T-14 | 下載按鈕產生 .md 檔 |
-| T-20 | README 撰寫（含 demo 截圖、方法論限制） | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
+| ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
+|---|---|---|---|---|---|
+| T-16 | 知名年份驗證測試（3–5 案例） | | 3h | T-13 | 產出驗證報告 Markdown |
+| T-17 | 手動輸入 fallback 介面 | ✅ 完成 | 1h | T-14 | Vision 失敗時可切換手動 |
+| T-18 | 錯誤處理與 loading 狀態優化 | | 2h | T-14 | 各種例外都有友善訊息 |
+| T-19 | 一鍵匯出報告為 Markdown | | 1h | T-14 | 下載按鈕產生 .md 檔 |
+| T-20 | README 撰寫（含 demo 截圖、方法論限制） | | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
 
 ---
 
