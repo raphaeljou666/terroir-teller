@@ -153,6 +153,17 @@
 >   都正確、沒有從中間斷開。Barolo／Central Otago／Marlborough 的降雨柱狀圖下方固定加一行
 >   ERA5 山區降雨高估的 caption，常數直接從 `report.MOUNTAIN_RAINFALL_BIAS_REGIONS` 匯入，
 >   不重複定義產區清單。
+> - **手機實測（條款 31）**：用真的手機連區網 IP 走完一輪，拍照入口正常叫出相機、版面不需
+>   橫向捲動；兩張不在 20 產區清單內的酒標都正確擋下並保留表單可改，最後用 Chianti 酒標完整
+>   跑通辨識與風味分析。環境前提記一下，這兩點實際卡住過：WSL2 要設 `networkingMode=mirrored`
+>   （`.wslconfig`），且 Windows 防火牆要放行 TCP 8501 的對內連線，否則手機連不到。
+> - **待辦：手機拍照到辨識結果偏慢**（實測 `vision.py` 有觸發「超過 US-1.2 的 5 秒目標」的 log
+>   warning）。成因不是模型慢，是 `_encode_image_data_url()` 直接把原圖 `read_bytes()` 後
+>   base64——手機原圖動輒 3–5MB／3000×4000，編碼後變 4–6.7MB 整份送進 OpenAI，而 Vision API
+>   本來就會把圖縮到 2048 內、短邊 768 再切 512px tile，送超過這個尺寸的部分純屬浪費上傳時間
+>   與 image token。**列入下一輪打磨處理，本輪不修**（條款 30：先確保端到端能跑，再回頭優化）。
+>   另外注意 `_call_vision_api()` 的 `started = time.perf_counter()` 目前設在 encode 之後，
+>   5 秒目標的量測沒把編碼時間算進去，改善幅度會被低估。
 
 ---
 
