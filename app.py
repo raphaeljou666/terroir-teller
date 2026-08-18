@@ -70,7 +70,7 @@ def render_upload_section() -> None:
     而不是白話錯誤訊息（條款 18、US-4.1「不會白畫面」）。
     """
     st.subheader("上傳酒標")
-    camera_file = st.camera_input("拍照上傳酒標")
+    camera_file = st.camera_input("拍照上傳酒標", resolution="1080p")
     uploaded_file = st.file_uploader("或選擇圖片檔案", type=["jpg", "jpeg", "png"])
     image_file = camera_file or uploaded_file
 
@@ -91,7 +91,8 @@ def render_upload_section() -> None:
         return
 
     try:
-        st.image(image_file, caption="已上傳的酒標", width=240)
+        thumbnail_bytes = vision.make_display_thumbnail_bytes(image_file.getvalue(), image_file.name)
+        st.image(thumbnail_bytes, caption="已上傳的酒標", width=240)
     except Exception as exc:  # noqa: BLE001 — st.image 對無法解碼的內容拋的例外型別不固定
         logger.error("縮圖顯示失敗，技術細節：%r", exc)
         st.session_state.upload_warning = USER_MESSAGE_BAD_FORMAT

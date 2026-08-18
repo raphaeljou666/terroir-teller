@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from typing import Any
 import openai
 from dotenv import load_dotenv
 from openai import OpenAI
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,17 @@ VISION_MODEL = "gpt-4o-mini"
 MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024  # 條款 27：上傳圖片大小上限 5MB
 ALLOWED_EXTENSIONS = (".jpg", ".jpeg", ".png")
 ALLOWED_PIL_FORMATS = ("JPEG", "PNG")
+
+# 送進 Vision API 前的縮圖上限。GPT-4o-mini Vision 本身就會把圖縮到 2048px 內、短邊 768px
+# 再切 512px tile，送超過 2048 的部分模型根本看不到，純屬浪費上傳時間與 image token。
+# 1600 留有安全邊界，確定不會被 API 自己的縮放吃掉任何細節（見 T-18 實作備註的實測數字）。
+ENCODE_MAX_LONG_EDGE_PX = 1600
+ENCODE_JPEG_QUALITY = 85
+
+# 給 UI 顯示縮圖用的尺寸，跟送進 API 的版本是兩個獨立設定——顯示只需要 240px 寬，
+# 這裡抓 2 倍給高解析度螢幕，遠比 API 用的 1600px 版本小很多。
+DISPLAY_THUMBNAIL_MAX_LONG_EDGE_PX = 480
+DISPLAY_THUMBNAIL_JPEG_QUALITY = 80
 
 # HTTP client 逾時設寬鬆一點，避免把正常的網路波動誤判成辨識失敗；US-1.2 的「5 秒」是
 # 效能目標，不是硬性逾時門檻，超過只記 log warning（見 `_call_vision_api()`）。
@@ -184,11 +196,47 @@ def _validate_image(image_path: Path) -> None:
         raise VisionError(USER_MESSAGE_BAD_FORMAT, f"內容實際格式為 {actual_format!r}，非 JPEG/PNG")
 
 
+def _resize_image_bytes(
+    raw_bytes: bytes, pil_format: str, max_long_edge_px: int, jpeg_quality: int
+) -> bytes:
+    """把圖片位元組縮到長邊上限內，已經在上限內的圖片原樣回傳（不重新編碼）。
+
+    Args:
+        raw_bytes: 原始圖片位元組（已通過 `_validate_image()`）。
+        pil_format: `"JPEG"` 或 `"PNG"`，決定輸出編碼格式與是否套用 JPEG 品質參數。
+        max_long_edge_px: 長邊像素上限，只會縮小不會放大（`Image.thumbnail()` 的保證）。
+        jpeg_quality: JPEG 品質（1–95），只在 `pil_format == "JPEG"` 時生效。
+
+    Returns:
+        縮圖後的圖片位元組；若原圖已在長邊上限內，回傳未變動的 `raw_bytes`（避免無謂的
+        重新壓縮造成畫質流失）。
+    """
+    with Image.open(io.BytesIO(raw_bytes)) as image:
+        if max(image.size) <= max_long_edge_px:
+            return raw_bytes
+
+        image = ImageOps.exif_transpose(image)  # 手機照片常見 EXIF 旋轉，縮圖前先轉正
+        image.thumbnail((max_long_edge_px, max_long_edge_px), Image.LANCZOS)
+
+        buffer = io.BytesIO()
+        save_kwargs: dict[str, Any] = {"format": pil_format}
+        if pil_format == "JPEG":
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            save_kwargs.update(quality=jpeg_quality, optimize=True)
+        else:
+            save_kwargs["optimize"] = True
+        image.save(buffer, **save_kwargs)
+        return buffer.getvalue()
+
+
 def _encode_image_data_url(image_path: Path) -> str:
-    """把圖片讀成 base64 data URL，供 Vision API 的 `image_url` 欄位使用。
+    """把圖片縮圖後讀成 base64 data URL，供 Vision API 的 `image_url` 欄位使用。
 
     注意：不重用 `_validate_image()` 內驗證用的 `Image` 物件——呼叫過 `verify()` 後該物件
-    已失效，這裡改用 `read_bytes()` 直接重新讀取原始位元組。
+    已失效，這裡改用 `read_bytes()` 直接重新讀取原始位元組。縮圖上限見 `ENCODE_MAX_LONG_EDGE_PX`
+    模組常數註解——手機原圖動輒 3000×4000，遠超過 Vision API 自己會做的縮放上限，先在這裡
+    縮小可以省下大半上傳時間，不影響辨識結果。
 
     Args:
         image_path: 已通過驗證的本機圖片檔案路徑。
@@ -196,10 +244,37 @@ def _encode_image_data_url(image_path: Path) -> str:
     Returns:
         `data:image/jpeg;base64,...` 或 `data:image/png;base64,...` 格式的字串。
     """
-    mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+    pil_format = "PNG" if image_path.suffix.lower() == ".png" else "JPEG"
+    mime_type = "image/png" if pil_format == "PNG" else "image/jpeg"
     raw_bytes = image_path.read_bytes()
-    encoded = base64.b64encode(raw_bytes).decode("ascii")
+    resized_bytes = _resize_image_bytes(
+        raw_bytes, pil_format, ENCODE_MAX_LONG_EDGE_PX, ENCODE_JPEG_QUALITY
+    )
+    encoded = base64.b64encode(resized_bytes).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def make_display_thumbnail_bytes(raw_bytes: bytes, filename: str) -> bytes:
+    """給 UI 顯示用的縮圖位元組，直接可傳給 `st.image()`。
+
+    跟送進 Vision API 的縮圖（`_encode_image_data_url()`）是兩組獨立的尺寸／品質設定——
+    顯示只需要幾百 px 寬，遠比送進 API 的 1600px 版本小，沒必要重用同一份編碼結果。
+
+    Args:
+        raw_bytes: 使用者上傳的原始圖片位元組。
+        filename: 上傳檔名，用來判斷輸出格式（`.png` 保留 PNG，其餘一律視為 JPEG）。
+
+    Returns:
+        縮圖位元組。
+
+    Raises:
+        UnidentifiedImageError: 內容無法解碼為圖片。
+        OSError: PIL 開啟或處理圖片時失敗。
+    """
+    pil_format = "PNG" if Path(filename).suffix.lower() == ".png" else "JPEG"
+    return _resize_image_bytes(
+        raw_bytes, pil_format, DISPLAY_THUMBNAIL_MAX_LONG_EDGE_PX, DISPLAY_THUMBNAIL_JPEG_QUALITY
+    )
 
 
 # --- OpenAI Vision API 呼叫 ----------------------------------------------------
@@ -237,8 +312,8 @@ def _call_vision_api(client: OpenAI, image_path: Path) -> dict[str, Any]:
     Raises:
         VisionError: API 呼叫失敗，或回應內容無法解析為合法 JSON。
     """
-    data_url = _encode_image_data_url(image_path)
     started = time.perf_counter()
+    data_url = _encode_image_data_url(image_path)
     try:
         response = client.chat.completions.create(
             model=VISION_MODEL,
