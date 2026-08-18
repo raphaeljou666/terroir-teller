@@ -242,3 +242,104 @@ def test_main無任何參數時列印說明並回傳2(capsys: pytest.CaptureFixt
     exit_code = agent.main([])
     assert exit_code == 2
     assert "usage" in capsys.readouterr().out.lower()
+
+
+# --- analyze --------------------------------------------------------------------------
+
+
+def test_analyze成功時回傳ok狀態與報告全文(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData(
+        region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
+    )
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "ok"))
+    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
+
+    result = agent.analyze(region="Bordeaux", year=2019)
+
+    assert result.status == "ok"
+    assert result.markdown == "# 報告全文"
+    assert result.gathered is gathered
+
+
+def test_analyze產區不合法時回傳region_not_covered與白話說明(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData(
+        region_validity={"valid": False, "reason": "本系統目前不涵蓋「Santorini」這個產區。"}
+    )
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(
+        agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "region_not_covered")
+    )
+
+    result = agent.analyze(region="Santorini", year=2019)
+
+    assert result.status == "region_not_covered"
+    assert result.user_message == "本系統目前不涵蓋「Santorini」這個產區。"
+    assert result.gathered is gathered
+
+
+def test_analyze酒標讀不出產區時回傳label_no_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData(label_info={"region": None})
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(
+        agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "label_no_region")
+    )
+
+    result = agent.analyze(image_path="x.jpg")
+
+    assert result.status == "label_no_region"
+    assert result.user_message == agent.USER_MESSAGE_NO_REGION_FROM_LABEL
+
+
+def test_analyze達到max_iterations上限仍視同ok嘗試生成報告(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData(region_canonical="Bordeaux", region_zh="波爾多")
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(
+        agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "max_iterations")
+    )
+    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 部分資料報告")
+
+    result = agent.analyze(region="Bordeaux", year=2019)
+
+    assert result.status == "ok"
+    assert result.markdown == "# 部分資料報告"
+
+
+def test_analyze沒有api_key時回傳error狀態與空的gathered(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_agent_error() -> None:
+        raise agent.AgentError(agent.USER_MESSAGE_NO_API_KEY, "環境變數 OPENAI_API_KEY 未設定")
+
+    monkeypatch.setattr(agent, "_get_client", _raise_agent_error)
+
+    result = agent.analyze(region="Bordeaux", year=2019)
+
+    assert result.status == "error"
+    assert result.user_message == agent.USER_MESSAGE_NO_API_KEY
+    assert result.gathered == agent.GatheredData()
+
+
+def test_analyze報告生成失敗時回傳error狀態(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData(region_canonical="Bordeaux", region_zh="波爾多")
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "ok"))
+
+    def _raise_report_error(**kwargs: Any) -> None:
+        raise agent.report.ReportGenerationError("報告生成暫時無法使用，請稍後再試一次。", "detail")
+
+    monkeypatch.setattr(agent.report, "generate_report", _raise_report_error)
+
+    result = agent.analyze(region="Bordeaux", year=2019)
+
+    assert result.status == "error"
+    assert result.user_message == "報告生成暫時無法使用，請稍後再試一次。"
+
+
+def test_analyze迴圈結束仍未確認產區時回傳error狀態(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData()
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "ok"))
+
+    result = agent.analyze(region="Bordeaux", year=2019)
+
+    assert result.status == "error"
+    assert result.user_message == agent.USER_MESSAGE_AGENT_FAILED
