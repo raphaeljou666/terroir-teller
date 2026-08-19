@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 MIN_VINTAGE_YEAR = 1940
 
+# 均溫／降雨兩張圖表固定的角色配色：橘色＝該年（比較主體）、藍色＝30 年平均（參照基準），
+# 兩張圖用同一組，不因資料而互換。依 st.context.theme.type 挑對應色階，跟 .streamlit/
+# config.toml 的主題保持同步。色碼已用 dataviz skill 的 validate_palette.js 驗證過
+# CVD 安全性與對比（亮／暗模式皆 ALL CHECKS PASS，見 T-18 實作備註）。
+VINTAGE_COLOR = {"light": "#eb6834", "dark": "#d95926"}
+BASELINE_COLOR = {"light": "#2a78d6", "dark": "#3987e5"}
+
 
 def _init_session_state() -> None:
     """初始化這次 session 需要的欄位，只在第一次執行時設定預設值。"""
@@ -76,14 +83,23 @@ def _run_vision_recognition(image_path: str) -> dict[str, Any] | None:
     return label_info.to_dict()
 
 
+def _validate_uploaded_file(image_file: Any) -> str | None:
+    """檢查副檔名與檔案大小，回傳對應的白話警告訊息；沒問題時回傳 `None`。"""
+    if Path(image_file.name).suffix.lower() not in vision.ALLOWED_EXTENSIONS:
+        return vision.USER_MESSAGE_BAD_FORMAT
+    if len(image_file.getvalue()) > vision.MAX_IMAGE_SIZE_BYTES:
+        return vision.USER_MESSAGE_TOO_LARGE
+    return None
+
+
 def render_upload_section() -> None:
     """兩個上傳入口（拍照／選擇檔案，條款 26），偵測到新圖片時驗證、存檔、辨識、填表單。
 
     驗證（副檔名／大小／內容能不能被解碼）一定要在 `st.image()` 顯示縮圖之前做完——
     `st.image()` 遇到無法解碼的內容會直接拋例外，順序顛倒會讓使用者看到 stack trace
-    而不是白話錯誤訊息（條款 18、US-4.1「不會白畫面」）。
+    而不是白話錯誤訊息（條款 18、US-4.1「不會白畫面」）。標題文字由外層的 `st.expander`
+    標籤負責，這裡不重複加一個 subheader。
     """
-    st.subheader("上傳酒標")
     camera_file = st.camera_input("拍照上傳酒標", resolution="1080p")
     uploaded_file = st.file_uploader("或選擇圖片檔案", type=["jpg", "jpeg", "png"])
     image_file = camera_file or uploaded_file
@@ -94,18 +110,15 @@ def render_upload_section() -> None:
     is_new_file = image_file.file_id != st.session_state.processed_file_id
     if is_new_file:
         st.session_state.processed_file_id = image_file.file_id
-        st.session_state.upload_warning = None
-
-        if Path(image_file.name).suffix.lower() not in vision.ALLOWED_EXTENSIONS:
-            st.session_state.upload_warning = vision.USER_MESSAGE_BAD_FORMAT
-        elif len(image_file.getvalue()) > vision.MAX_IMAGE_SIZE_BYTES:
-            st.session_state.upload_warning = vision.USER_MESSAGE_TOO_LARGE
+        st.session_state.upload_warning = _validate_uploaded_file(image_file)
 
     if st.session_state.upload_warning:
         return
 
     try:
-        thumbnail_bytes = vision.make_display_thumbnail_bytes(image_file.getvalue(), image_file.name)
+        thumbnail_bytes = vision.make_display_thumbnail_bytes(
+            image_file.getvalue(), image_file.name
+        )
         st.image(thumbnail_bytes, caption="已上傳的酒標", width=240)
     except Exception as exc:  # noqa: BLE001 — st.image 對無法解碼的內容拋的例外型別不固定
         logger.error("縮圖顯示失敗，技術細節：%r", exc)
@@ -184,12 +197,40 @@ def run_analysis(values: dict[str, Any]) -> None:
         status.update(label="分析完成", state="complete")
 
 
+def render_anomaly_metrics(anomaly: dict[str, Any] | None) -> None:
+    """報告最上方的兩張距平卡片：生長積溫（GDD）與生長季降雨，各自的絕對值＋距平百分比。
+
+    `pct_anomaly` 在基準線標準差為 0 時會是 `None`（`st.metric` 的 `delta` 支援 `None`，
+    此時卡片仍會顯示原始數值、只是不畫上下箭頭，不會捏造一個假的百分比，條款 15）。
+    """
+    if not anomaly:
+        return
+
+    gdd = anomaly.get("gdd", {})
+    rain = anomaly.get("season_precipitation", {})
+
+    col1, col2 = st.columns(2)
+    with col1:
+        pct = gdd.get("pct_anomaly")
+        st.metric(
+            "生長積溫（GDD）", f"{gdd.get('vintage_value', 0):.0f}",
+            delta=f"{pct:+.1f}%" if pct is not None else None,
+        )
+    with col2:
+        pct = rain.get("pct_anomaly")
+        st.metric(
+            "生長季降雨量（mm）", f"{rain.get('vintage_value', 0):.0f}",
+            delta=f"{pct:+.1f}%" if pct is not None else None,
+        )
+
+
 def render_report(result: agent.AnalysisResult) -> None:
     """依 `result.status` 分支渲染：成功顯示報告＋圖表，其餘顯示白話說明（US-4.1）。"""
     if result.status != "ok" or result.markdown is None:
         st.warning(result.user_message)
         return
 
+    render_anomaly_metrics(result.gathered.anomaly)
     body, _, sources = result.markdown.partition("## 資料來源")
     st.markdown(body)
     render_charts(result.gathered)
@@ -209,6 +250,48 @@ def _load_monthly_comparison(region_canonical: str, vintage_year: int) -> pd.Dat
     return climate.build_monthly_comparison(season, baseline)
 
 
+def _build_temp_chart(
+    comparison: pd.DataFrame, year_label: str, vintage_color: str, baseline_color: str
+) -> go.Figure:
+    """組出每月均溫折線圖，該年與 30 年平均固定用同一組配色角色。"""
+    months = comparison["month_label"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=months, y=comparison["temp_mean_vintage"], name=year_label,
+        line=dict(color=vintage_color, width=2),
+    ))
+    fig.add_trace(go.Scatter(
+        x=months, y=comparison["temp_mean_baseline"], name="30 年平均",
+        line=dict(color=baseline_color, width=2),
+    ))
+    fig.update_layout(
+        title="每月均溫（該年 vs 30 年平均）", yaxis_title="°C",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def _build_rain_chart(
+    comparison: pd.DataFrame, year_label: str, vintage_color: str, baseline_color: str
+) -> go.Figure:
+    """組出每月降雨量柱狀圖，跟均溫折線圖用同一組配色角色（該年／30 年平均語意一致）。"""
+    months = comparison["month_label"]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=months, y=comparison["precipitation_mm_vintage"], name=year_label,
+        marker_color=vintage_color,
+    ))
+    fig.add_trace(go.Bar(
+        x=months, y=comparison["precipitation_mm_baseline"], name="30 年平均",
+        marker_color=baseline_color,
+    ))
+    fig.update_layout(
+        title="每月降雨量（該年 vs 30 年平均）", yaxis_title="mm", barmode="group",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
 def render_charts(gathered: agent.GatheredData) -> None:
     """畫每月均溫折線圖與降雨柱狀圖（T-15、US-4.2），山區產區加 ERA5 高估提醒。"""
     if not gathered.region_canonical or not gathered.vintage_year:
@@ -222,19 +305,18 @@ def render_charts(gathered: agent.GatheredData) -> None:
     st.subheader("氣候距平圖表")
     year_label = f"{gathered.vintage_year} 年"
 
-    months = comparison["month_label"]
+    # st.context.theme.type 在沒有真實瀏覽器連線時（例如 AppTest、主題切換瞬間）可能是
+    # None，此時退回亮色模式的配色，不能讓圖表因此掛掉。
+    theme_type = st.context.theme.type or "light"
+    vintage_color = VINTAGE_COLOR[theme_type]
+    baseline_color = BASELINE_COLOR[theme_type]
 
-    temp_fig = go.Figure()
-    temp_fig.add_trace(go.Scatter(x=months, y=comparison["temp_mean_vintage"], name=year_label))
-    temp_fig.add_trace(go.Scatter(x=months, y=comparison["temp_mean_baseline"], name="30 年平均"))
-    temp_fig.update_layout(title="每月均溫（該年 vs 30 年平均）", yaxis_title="°C")
-    st.plotly_chart(temp_fig, width="stretch")
-
-    rain_fig = go.Figure()
-    rain_fig.add_trace(go.Bar(x=months, y=comparison["precipitation_mm_vintage"], name=year_label))
-    rain_fig.add_trace(go.Bar(x=months, y=comparison["precipitation_mm_baseline"], name="30 年平均"))
-    rain_fig.update_layout(title="每月降雨量（該年 vs 30 年平均）", yaxis_title="mm", barmode="group")
-    st.plotly_chart(rain_fig, width="stretch")
+    st.plotly_chart(
+        _build_temp_chart(comparison, year_label, vintage_color, baseline_color), width="stretch"
+    )
+    st.plotly_chart(
+        _build_rain_chart(comparison, year_label, vintage_color, baseline_color), width="stretch"
+    )
 
     if gathered.region_canonical in MOUNTAIN_RAINFALL_BIAS_REGIONS:
         st.caption(
@@ -251,7 +333,8 @@ def main() -> None:
     st.title("🍷 TerroirTeller")
     st.caption("拍一張酒標，看看那一年的氣候可能帶來什麼風味傾向。")
 
-    render_upload_section()
+    with st.expander("上傳酒標", expanded=st.session_state.result is None):
+        render_upload_section()
     pressed, values = render_label_form()
 
     if pressed:

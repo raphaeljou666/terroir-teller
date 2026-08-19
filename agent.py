@@ -338,6 +338,20 @@ def _terminal_state_message(gathered: GatheredData, state: TerminalState) -> str
     return USER_MESSAGE_NO_REGION_FROM_LABEL
 
 
+def _resolve_early_exit(gathered: GatheredData, state: TerminalState) -> AnalysisResult | None:
+    """agent loop 結束後，判斷是否要提前回傳結果；回傳 `None` 表示可以繼續生成報告。"""
+    if state in ("region_not_covered", "label_no_region"):
+        return AnalysisResult(
+            status=state, user_message=_terminal_state_message(gathered, state), gathered=gathered
+        )
+    if gathered.region_canonical is None:
+        logger.error("Agent 迴圈結束但未能確認產區，終止狀態：%s", state)
+        return AnalysisResult(
+            status="error", user_message=USER_MESSAGE_AGENT_FAILED, gathered=gathered
+        )
+    return None
+
+
 # --- 對外分析函式（CLI 與 Streamlit 共用） -------------------------------------------
 
 
@@ -376,16 +390,9 @@ def analyze(
         logger.error("技術細節：%s", exc.technical_detail)
         return AnalysisResult(status="error", user_message=exc.user_message)
 
-    if state in ("region_not_covered", "label_no_region"):
-        return AnalysisResult(
-            status=state, user_message=_terminal_state_message(gathered, state), gathered=gathered
-        )
-
-    if gathered.region_canonical is None:
-        logger.error("Agent 迴圈結束但未能確認產區，終止狀態：%s", state)
-        return AnalysisResult(
-            status="error", user_message=USER_MESSAGE_AGENT_FAILED, gathered=gathered
-        )
+    early_result = _resolve_early_exit(gathered, state)
+    if early_result is not None:
+        return early_result
 
     if on_progress:
         on_progress("正在生成報告……")

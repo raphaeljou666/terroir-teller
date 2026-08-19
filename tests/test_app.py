@@ -191,6 +191,36 @@ def test_氣候資料取不到時圖表區顯示白話說明而非靜默消失(m
     assert "暫時無法取得" in "".join(i.value for i in at.info)
 
 
+# --- 距平卡片：pct_anomaly 為 None 時不拋例外（T-18） -------------------------------------
+
+
+def test_距平百分比為None時距平卡片不拋例外且不顯示delta(monkeypatch: Any) -> None:
+    anomaly = {
+        "gdd": {"vintage_value": 1500.0, "pct_anomaly": None},
+        "season_precipitation": {"vintage_value": 600.0, "pct_anomaly": None},
+    }
+    monkeypatch.setattr(
+        agent,
+        "analyze",
+        lambda **kw: agent.AnalysisResult(
+            status="ok",
+            markdown="## 風味推測\n測試內容\n## 資料來源\n[1] 測試來源",
+            gathered=agent.GatheredData(
+                region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019, anomaly=anomaly
+            ),
+        ),
+    )
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _fill_minimum_form(at)
+    at.button[0].click().run()
+
+    assert not at.exception
+    assert len(at.metric) == 2
+    assert all(m.delta == "" for m in at.metric)
+
+
 # --- 成本控管回歸測試（條款 19，最重要） -----------------------------------------------
 
 
