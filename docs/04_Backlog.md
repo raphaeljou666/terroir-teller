@@ -173,9 +173,126 @@
 |---|---|---|---|---|---|
 | T-16 | 知名年份驗證測試（3–5 案例） | | 3h | T-13 | 產出驗證報告 Markdown |
 | T-17 | 手動輸入 fallback 介面 | ✅ 完成 | 1h | T-14 | Vision 失敗時可切換手動 |
-| T-18 | 錯誤處理與 loading 狀態優化 | | 2h | T-14 | 各種例外都有友善訊息 |
+| T-18 | 錯誤處理與 loading 狀態優化 | ✅ 完成 | 2h | T-14 | 各種例外都有友善訊息 |
 | T-19 | 一鍵匯出報告為 Markdown | | 1h | T-14 | 下載按鈕產生 .md 檔 |
 | T-20 | README 撰寫（含 demo 截圖、方法論限制） | | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
+
+> **T-18 實作備註**
+>
+> - **手機拍照偏慢（結掉 T-14/T-15 備註留下的待辦）**：`src/vision.py` 新增
+>   `_resize_image_bytes()`，送進 Vision API 前把長邊縮到 1600px、JPEG quality 85，
+>   已在上限內的圖片不重新編碼。1600 是刻意選在 GPT-4o-mini Vision 自己會做的
+>   2048px／768px 縮放上限之內、留有安全邊界，不是隨便挑的數字。實測
+>   `data/test_labels/` 12 張真實酒標：5 張長邊 >1600px 的（amarone／chianti／
+>   dasti／idontknow／syrah）縮圖後各減少 55–58%，總計 5380.1 KB → 3509.3 KB
+>   （整體縮減 34.8%，base64 膨脹後實際送出的 payload 從約 7171.7 KB 降到
+>   4677.9 KB）；另外 7 張本來就在 1600px 以內的圖片維持 0% 變動，沒有做無謂的
+>   重新壓縮。準確度驗證：`chianti.jpg`／`riesling.jpg` 縮圖前後四個欄位
+>   （產區／酒莊／年份／品種）完全一致；`amarone.jpg` 出現 `"Valpolicella"` vs
+>   `"Valpolicella Classico"` 的差異，但另外對**同一張原圖**連續呼叫三次
+>   `recognize_label()` 做控制組，發現同樣有命名差異、甚至年份也曾經跳成不同值
+>   （2018 → 2016），確認這是 GPT-4o-mini 本身輸出的隨機性，不是縮圖造成的
+>   準確度流失。同時修正 `_call_vision_api()` 的 `started = time.perf_counter()`
+>   位置，搬到 `_encode_image_data_url()` 之前，US-1.2 的 5 秒目標量測不再漏算
+>   編碼耗時。
+> - **`st.camera_input(resolution="1080p")` 先加後拿掉**：本來想在瀏覽器端先降
+>   解析度，跟伺服器端 1600px 的縮圖形成兩層縮減（選 1080p 不選 480p／720p的
+>   理由：480p 風險太高，酒標常有極小字的 AOC 子產區、年份數字；720p 已經小於
+>   伺服器端 1600px 上限，伺服器縮圖對相機來源的圖會完全沒作用；1080p 對典型
+>   手機 3000–4000px 長邊照片仍是有感縮減，又留了安全邊界）。但手機實測發現
+>   `st.camera_input()` 本身在這次的測試情境下打不開（見下方「移除
+>   `st.camera_input()`」），這個 `resolution` 參數也就跟著拿掉了。
+> - **`st.status()` 分段進度取代單一 spinner**：agent loop 本來就有語意清楚的
+>   分階段 tool call（`recognize_wine_label` → `check_region_validity` →
+>   `query_climate_anomaly` → `query_climate_knowledge` → 選擇性的
+>   `query_terroir_knowledge`）加上報告生成，10 秒以上的等待很常見，尤其在
+>   手機網路下。`agent.py` 的 `run_agent_loop()`／`analyze()` 新增選填的
+>   `on_progress` callback（預設 `None`），每次工具呼叫完成後帶一句白話標籤
+>   呼叫一次；CLI 路徑（`agent.py` 自己的 `main()`）不傳這個參數，行為完全
+>   不變。改法收得很窄，只加一個參數，沒有引入新的機制或狀態。
+> - **暫存檔清理**：`_temp_image_path()` 改成清掉「上一張」圖片的暫存檔（路徑存
+>   `st.session_state.temp_image_path`），絕不會刪到正在使用的檔案，因為刪除
+>   的一定是上一輪寫入的舊檔。session 結束時最後一張圖片的暫存檔不清（OS 暫存
+>   目錄本身會定期清理），這是刻意接受的低風險殘留。
+> - **`render_charts()` 靜默失敗修正**：氣候圖表資料取不到時原本直接
+>   `return`，畫面上什麼都不會顯示；改成 `st.info("這個產區與年份的氣候距平
+>   圖表資料暫時無法取得，不影響上面的風味推測報告。")`，不捏造資料（條款 15）。
+> - **常數去重**：`app.py`／`src/vision.py` 各自定義過一份文字相同的
+>   `USER_MESSAGE_BAD_FORMAT`／`USER_MESSAGE_TOO_LARGE`，`app.py` 改成引用
+>   `vision.py` 的版本，避免以後改一處漏改另一處。
+> - **UI 主題**：新增 `.streamlit/config.toml`，用 Streamlit 原生
+>   `[theme.light]`／`[theme.dark]` 雙模式主題，波爾多酒紅為 primaryColor、
+>   牛皮紙／橡木桶暖色調背景，亮暗兩組配色都過 WCAG AA 對比檢查（文字
+>   ≥4.5:1、UI 元件 ≥3:1，實測全部落在 5.6:1 以上）。`requirements.txt` 的
+>   `streamlit` 下限從 `1.38.0` 提升到 `1.59.0`——實測用二分法確認
+>   `[theme.light]`／`[theme.dark]` 段落在 1.44.0 引入，但這次同時用到的
+>   `st.camera_input(resolution=...)` 要到 1.59.0 才有，後者是真正的下限
+>   （目前開發環境裝的是 1.61.1）。
+> - **距平卡片**：`render_report()` 最上方新增 `render_anomaly_metrics()`，用
+>   `st.metric` 顯示 GDD／生長季降雨的距平百分比（`delta` 參數），
+>   `pct_anomaly` 為 `None`（基準線標準差為 0）時只顯示數值、不畫假的箭頭。
+> - **版面順序——選 `st.expander` 不選 `st.tabs`**：上傳區用
+>   `st.expander("上傳酒標", expanded=st.session_state.result is None)` 包起來，
+>   有結果後預設收合，報告往上移，不用再往下捲很久。選 expander 是因為整個
+>   流程是線性先後關係（上傳→確認→分析→報告），不是使用者主動切換的並列
+>   視圖；改用 tabs 需要把按鈕與報告渲染搬進 tab body，有風險打亂成本控管的
+>   核心不變量，expander 只是包一層，`render_label_form()`／`run_analysis()`
+>   呼叫點完全不動。
+> - **圖表配色一致**：均溫折線圖與降雨柱狀圖原本沒有指定顏色，該年與 30 年
+>   平均在兩張圖之間顏色不一致。改成固定角色配色（橘＝該年、藍＝30 年平均，
+>   兩張圖同一組），依 `st.context.theme.type` 對應亮／暗模式色階，跟
+>   `.streamlit/config.toml` 主題保持同步；色碼用 dataviz skill 的
+>   `validate_palette.js` 驗證過 CVD 安全性與對比，亮暗模式皆 `ALL CHECKS
+>   PASS`。`render_charts()` 拆成 `_build_temp_chart()`／`_build_rain_chart()`
+>   兩個小函式，維持條款 7 單一職責。
+> - **`tests/test_app.py` 新增**（本輪第一步）：用
+>   `streamlit.testing.v1.AppTest` 離線驗證整支 `app.py`，涵蓋初始渲染、按鈕
+>   啟用/停用、`region_not_covered` 狀態、上傳格式/大小驗證、辨識成功帶入
+>   表單、氣候資料取不到的白話說明、`pct_anomaly=None` 不拋例外，以及最重要
+>   的一條：已有結果後編輯任一欄位觸發 rerun 不會重複呼叫 `agent.analyze()`
+>   （條款 19 成本控制回歸測試）。`AppTest` 沒有 `camera_input` 的存取器，
+>   拍照入口測不到，上傳測試一律走 `file_uploader` 模擬。
+> - **開發者實測回饋（合併前追加）**：第一次拍照辨識體感超過 15 秒，同一張照片
+>   重拍第二次明顯縮短到 10 秒內；換一張新照片第一次約 10 秒，重拍第二次縮到
+>   5 秒內。這個「第一次慢、重複拍變快」的模式跟 `recognize_label()` 本身有沒
+>   有快取無關（條款 15 的精神——每次都是真的呼叫 API，沒有偷懶回傳舊結果）；
+>   合理解釋是連線層的暖機成本：同一個 Python 行程內，第一次呼叫 OpenAI API
+>   要重新做 TLS 握手／DNS 查詢，之後的請求透過 `httpx`／`OpenAI` client 的
+>   連線池重用連線，省下這段固定成本。縮圖後的耗時仍在 5–15 秒區間內波動，
+>   跟本輪稍早用 `chianti.jpg` 測到 GPT-4o-mini Vision 本身回應時間有 2–30 秒
+>   的自然波動（見前面的準確度驗證段落）是同一個現象，不是這次改動帶來的
+>   新問題。
+> - **`beaujolais_nouveau.jpg` 辨識出的產區是 `"Beaujolais"`**：這其實是對的，
+>   Beaujolais Nouveau 是產區 Beaujolais 的早裝瓶酒款風格，不是另一個獨立產區，
+>   模型正確抓出了地理產區名稱。額外用 main 分支縮圖前的原始 `vision.py` 對
+>   同一張照片重跑一次確認，結果同樣是 `"Beaujolais"`（酒莊欄位從
+>   `"Jean Bousquet"` 變成 `None`，屬於前述的模型輸出隨機性，非縮圖造成），
+>   證實縮圖改動沒有讓辨識結果變差。`Beaujolais` 本身不在系統支援的 20 個
+>   產區清單內（`data/regions.json` 沒有這筆），所以會走 `region_not_covered`
+>   分支、表單保留可編輯，行為符合預期。
+> - **手機連區網 IP 完整實測（條款 31，合併前完成）**：拍照到辨識這段確認有感覺
+>   變快，`st.status()` 分段進度提示詞都正常出現，`st.expander` 收合／展開上傳區
+>   正常。但發現 `st.camera_input()` 在這個情境下會卡在瀏覽器「This app would
+>   like to use your camera」的權限請求畫面，永遠拿不到授權、整塊元件不能用，
+>   只能靠下面的 `st.file_uploader()` 上傳／拍照。
+> - **移除 `st.camera_input()`（覆寫規範 #26）**：根因是 `st.camera_input()`
+>   要瀏覽器的安全情境（HTTPS 或 `localhost`）才能取得相機權限，手機連
+>   `http://<區網 IP>:8501` 這種未加密的來源會被瀏覽器直接擋掉相機存取，不是
+>   程式邏輯的錯誤。條款 26 原本建議「拍照優先用 `st.camera_input()`」，但這個
+>   元件在條款 31 定義的 Phase 2（本機／區網 HTTP）測試情境下完全打不開，留著
+>   只會讓使用者卡在一塊沒有用的權限請求畫面，因此拿掉，只留
+>   `st.file_uploader()`——手機瀏覽器的原生檔案選擇器本身就有「拍照」選項
+>   （iOS Safari／Android Chrome 皆是），拍照能力沒有真的消失。等 Phase 3
+>   部署到 Streamlit Community Cloud（原生 HTTPS）之後可以重新評估要不要加
+>   回來。
+> - **氣候圖表使用者回饋（記錄，本輪不動）**：均溫／降雨兩張圖表被回饋「有點
+>   多餘，感覺取固定年區間呈現差異比較就好」，另外在圖表上放大後，沒有明顯的
+>   方式可以縮回原本最初的檢視範圍（Plotly 預設雙擊可重置座標軸，但這個手勢在
+>   觸控裝置上不直覺）。兩者都是圖表呈現方式本身的設計問題，不是本輪 bug 修復
+>   或樣式打磨的範圍（改動 T-15 的視覺化設計屬於新功能／重新設計，條款 10
+>   要求先進 Backlog、不當場實作），列入下一輪或 P2 評估：可以考慮拿掉雙圖表
+>   改成單一距平摘要、或是在圖表上加一顆明顯的「重置檢視」按鈕
+>   （`st.plotly_chart` 的 `config={"displayModeBar": True}` 之類）。
 
 ---
 
@@ -195,6 +312,11 @@
   不是酒標上寫的」，跟辨識結果分開呈現，並附引用來源（呼應條款 17）。實測時發現大部分真實
   酒標拍到的產區（如 Beaujolais、Chinon、Asti）不在 20 產區清單內，這個功能只在使用者拍到
   清單內的 20 個產區時才有意義。
+- **氣候距平圖表呈現方式重新設計**（T-18 手機實測回饋）：使用者反應均溫／降雨兩張圖表有點
+  多餘，感覺取固定年區間呈現差異比較就好；另外放大後沒有明顯的方式可以縮回原本最初的檢視
+  範圍（Plotly 預設雙擊重置座標軸，但這個手勢在觸控裝置上不直覺）。可能方向：拿掉雙圖表
+  改成單一距平摘要（例如只留 `st.metric` 卡片＋一句話敘述），或是保留圖表但加一顆明顯的
+  「重置檢視」按鈕。這是 T-15 視覺化設計本身的取捨，不是本輪 bug 修復或樣式打磨的範圍。
 
 ---
 

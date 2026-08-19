@@ -1,0 +1,19 @@
+# TerroirTeller 主題設定（T-18）。用 Streamlit 原生 [theme] 區塊，不引入外部 CSS／
+# 前端框架。亮／暗兩組配色各自過 WCAG AA 對比檢查（文字 ≥4.5:1、UI 元件 ≥3:1）才定案，
+# 見 docs/04_Backlog.md 的 T-18 實作備註。
+
+[theme]
+base = "light"
+font = "sans serif"
+
+[theme.light]
+primaryColor = "#7A1F3D"
+backgroundColor = "#FFFDF9"
+secondaryBackgroundColor = "#F3E9DE"
+textColor = "#2B1B17"
+
+[theme.dark]
+primaryColor = "#D96C87"
+backgroundColor = "#1C1210"
+secondaryBackgroundColor = "#2A1A17"
+textColor = "#F5EDE6"
