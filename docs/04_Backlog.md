@@ -251,13 +251,31 @@
 >   的一條：已有結果後編輯任一欄位觸發 rerun 不會重複呼叫 `agent.analyze()`
 >   （條款 19 成本控制回歸測試）。`AppTest` 沒有 `camera_input` 的存取器，
 >   拍照入口測不到，上傳測試一律走 `file_uploader` 模擬。
-> - **待辦：手機實測（條款 31）尚未執行**——這輪的 AI 開發環境沒有實體手機或
->   瀏覽器可用，`resolution="1080p"` 的實際拍照體感、`st.expander` 收合後在
->   小螢幕的可用性、`st.status()` 分段標籤在真實手機網路下的呈現，都只驗證了
->   邏輯與離線測試，還沒有人用手機連區網 IP 實際走過一輪。開發者合併前應
->   比照 T-14/T-15 的做法親自測一次（`streamlit run app.py
->   --server.address=0.0.0.0`，環境前提同上：WSL2 `networkingMode=mirrored`、
->   Windows 防火牆放行 TCP 8501）。
+> - **開發者實測回饋（合併前追加）**：第一次拍照辨識體感超過 15 秒，同一張照片
+>   重拍第二次明顯縮短到 10 秒內；換一張新照片第一次約 10 秒，重拍第二次縮到
+>   5 秒內。這個「第一次慢、重複拍變快」的模式跟 `recognize_label()` 本身有沒
+>   有快取無關（條款 15 的精神——每次都是真的呼叫 API，沒有偷懶回傳舊結果）；
+>   合理解釋是連線層的暖機成本：同一個 Python 行程內，第一次呼叫 OpenAI API
+>   要重新做 TLS 握手／DNS 查詢，之後的請求透過 `httpx`／`OpenAI` client 的
+>   連線池重用連線，省下這段固定成本。縮圖後的耗時仍在 5–15 秒區間內波動，
+>   跟本輪稍早用 `chianti.jpg` 測到 GPT-4o-mini Vision 本身回應時間有 2–30 秒
+>   的自然波動（見前面的準確度驗證段落）是同一個現象，不是這次改動帶來的
+>   新問題。
+> - **`beaujolais_nouveau.jpg` 辨識出的產區是 `"Beaujolais"`**：這其實是對的，
+>   Beaujolais Nouveau 是產區 Beaujolais 的早裝瓶酒款風格，不是另一個獨立產區，
+>   模型正確抓出了地理產區名稱。額外用 main 分支縮圖前的原始 `vision.py` 對
+>   同一張照片重跑一次確認，結果同樣是 `"Beaujolais"`（酒莊欄位從
+>   `"Jean Bousquet"` 變成 `None`，屬於前述的模型輸出隨機性，非縮圖造成），
+>   證實縮圖改動沒有讓辨識結果變差。`Beaujolais` 本身不在系統支援的 20 個
+>   產區清單內（`data/regions.json` 沒有這筆），所以會走 `region_not_covered`
+>   分支、表單保留可編輯，行為符合預期。
+> - **待辦：手機連區網 IP 的完整實測（條款 31）尚未確認執行**——上面兩點是開發者
+>   實際用 `st.camera_input()` 拍照測到的結果，是目前為止最接近真實使用情境的
+>   驗證，但測試裝置與網路路徑（是否為手機、是否透過區網 IP 連線）未特別記錄，
+>   `st.expander` 收合後在小螢幕的可用性、有沒有橫向捲動，仍建議額外用手機連
+>   區網 IP 走一輪確認（`streamlit run app.py --server.address=0.0.0.0`，
+>   環境前提同上：WSL2 `networkingMode=mirrored`、Windows 防火牆放行
+>   TCP 8501）。
 
 ---
 
