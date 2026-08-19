@@ -1,8 +1,8 @@
 """`app.py` 的測試（T-18）：離線驗證 Streamlit 主頁面流程，monkeypatch 掉 `agent.analyze`／
 `vision.recognize_label`，永遠不觸發真實 OpenAI 呼叫（條款 19）。
 
-用 `streamlit.testing.v1.AppTest` 無瀏覽器驅動整支腳本。`AppTest` 沒有 `camera_input` 的
-存取器，拍照入口在這裡測不到，上傳一律走 `file_uploader` 模擬。
+用 `streamlit.testing.v1.AppTest` 無瀏覽器驅動整支腳本。上傳一律走 `file_uploader` 模擬
+（`st.camera_input()` 已在 T-18 移除，見 `app.py` `render_upload_section()` docstring）。
 """
 
 from __future__ import annotations

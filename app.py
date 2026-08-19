@@ -93,16 +93,20 @@ def _validate_uploaded_file(image_file: Any) -> str | None:
 
 
 def render_upload_section() -> None:
-    """兩個上傳入口（拍照／選擇檔案，條款 26），偵測到新圖片時驗證、存檔、辨識、填表單。
+    """上傳入口（條款 26 已覆寫，見下方），偵測到新圖片時驗證、存檔、辨識、填表單。
+
+    移除了原本的 `st.camera_input()`：它需要瀏覽器的安全情境（HTTPS 或 localhost）才能
+    要到相機權限，實測手機連區網 IP（`http://<LAN IP>:8501`，條款 31 的 Phase 2 測試
+    情境）會卡在權限請求畫面、永遠拿不到授權。改成只留 `st.file_uploader()`——手機瀏覽器
+    的原生檔案選擇器本身就有「拍照」選項，拍照能力沒有消失。等 Phase 3 部署到 Streamlit
+    Community Cloud（原生 HTTPS）後可重新評估要不要加回來。
 
     驗證（副檔名／大小／內容能不能被解碼）一定要在 `st.image()` 顯示縮圖之前做完——
     `st.image()` 遇到無法解碼的內容會直接拋例外，順序顛倒會讓使用者看到 stack trace
     而不是白話錯誤訊息（條款 18、US-4.1「不會白畫面」）。標題文字由外層的 `st.expander`
     標籤負責，這裡不重複加一個 subheader。
     """
-    camera_file = st.camera_input("拍照上傳酒標", resolution="1080p")
-    uploaded_file = st.file_uploader("或選擇圖片檔案", type=["jpg", "jpeg", "png"])
-    image_file = camera_file or uploaded_file
+    image_file = st.file_uploader("上傳或拍攝酒標照片", type=["jpg", "jpeg", "png"])
 
     if image_file is None:
         return
