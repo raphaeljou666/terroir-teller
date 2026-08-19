@@ -135,7 +135,7 @@ def test_process_tool_calls偵測到產區不合法時回傳True並中止(monkey
     messages: list[dict[str, Any]] = []
     tool_call = _make_tool_call("check_region_validity", {"region_name": "Santorini"})
 
-    region_not_covered = agent._process_tool_calls([tool_call], gathered, messages)
+    region_not_covered = agent._process_tool_calls([tool_call], gathered, messages, lambda _: None)
 
     assert region_not_covered is True
     assert gathered.region_validity["valid"] is False
@@ -151,7 +151,20 @@ def test_process_tool_calls產區合法時回傳False(monkeypatch: pytest.Monkey
     gathered = agent.GatheredData()
     tool_call = _make_tool_call("check_region_validity", {"region_name": "Bordeaux"})
 
-    assert agent._process_tool_calls([tool_call], gathered, []) is False
+    assert agent._process_tool_calls([tool_call], gathered, [], lambda _: None) is False
+
+
+def test_process_tool_calls呼叫on_progress帶入對應階段的白話標籤(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        agent.tools.TOOL_DISPATCH, "check_region_validity",
+        lambda region_name: {"valid": True, "region_canonical": region_name, "region_zh": "波爾多"},
+    )
+    progress_messages: list[str] = []
+    tool_call = _make_tool_call("check_region_validity", {"region_name": "Bordeaux"})
+
+    agent._process_tool_calls([tool_call], agent.GatheredData(), [], progress_messages.append)
+
+    assert progress_messages == [agent._TOOL_PROGRESS_LABELS["check_region_validity"]]
 
 
 # --- _label_missing_region --------------------------------------------------------------
@@ -252,7 +265,7 @@ def test_analyze成功時回傳ok狀態與報告全文(monkeypatch: pytest.Monke
         region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
     )
     monkeypatch.setattr(agent, "_get_client", lambda: object())
-    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "ok"))
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "ok"))
     monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
 
     result = agent.analyze(region="Bordeaux", year=2019)
@@ -262,13 +275,49 @@ def test_analyze成功時回傳ok狀態與報告全文(monkeypatch: pytest.Monke
     assert result.gathered is gathered
 
 
+def test_analyze會把on_progress傳給run_agent_loop並在生成報告前額外呼叫一次(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gathered = agent.GatheredData(
+        region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
+    )
+    captured_callback: list[Any] = []
+
+    def _fake_run_agent_loop(client: Any, task: str, max_iterations: int, on_progress: Any = None) -> Any:
+        captured_callback.append(on_progress)
+        return gathered, "ok"
+
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(agent, "run_agent_loop", _fake_run_agent_loop)
+    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
+
+    progress_messages: list[str] = []
+    agent.analyze(region="Bordeaux", year=2019, on_progress=progress_messages.append)
+
+    assert captured_callback == [progress_messages.append]
+    assert progress_messages == ["正在生成報告……"]
+
+
+def test_analyze不傳on_progress時cli路徑行為不變(monkeypatch: pytest.MonkeyPatch) -> None:
+    gathered = agent.GatheredData(
+        region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
+    )
+    monkeypatch.setattr(agent, "_get_client", lambda: object())
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "ok"))
+    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
+
+    result = agent.analyze(region="Bordeaux", year=2019)
+
+    assert result.status == "ok"
+
+
 def test_analyze產區不合法時回傳region_not_covered與白話說明(monkeypatch: pytest.MonkeyPatch) -> None:
     gathered = agent.GatheredData(
         region_validity={"valid": False, "reason": "本系統目前不涵蓋「Santorini」這個產區。"}
     )
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(
-        agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "region_not_covered")
+        agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "region_not_covered")
     )
 
     result = agent.analyze(region="Santorini", year=2019)
@@ -282,7 +331,7 @@ def test_analyze酒標讀不出產區時回傳label_no_region(monkeypatch: pytes
     gathered = agent.GatheredData(label_info={"region": None})
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(
-        agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "label_no_region")
+        agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "label_no_region")
     )
 
     result = agent.analyze(image_path="x.jpg")
@@ -295,7 +344,7 @@ def test_analyze達到max_iterations上限仍視同ok嘗試生成報告(monkeypa
     gathered = agent.GatheredData(region_canonical="Bordeaux", region_zh="波爾多")
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(
-        agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "max_iterations")
+        agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "max_iterations")
     )
     monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 部分資料報告")
 
@@ -321,7 +370,7 @@ def test_analyze沒有api_key時回傳error狀態與空的gathered(monkeypatch: 
 def test_analyze報告生成失敗時回傳error狀態(monkeypatch: pytest.MonkeyPatch) -> None:
     gathered = agent.GatheredData(region_canonical="Bordeaux", region_zh="波爾多")
     monkeypatch.setattr(agent, "_get_client", lambda: object())
-    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "ok"))
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "ok"))
 
     def _raise_report_error(**kwargs: Any) -> None:
         raise agent.report.ReportGenerationError("報告生成暫時無法使用，請稍後再試一次。", "detail")
@@ -337,7 +386,7 @@ def test_analyze報告生成失敗時回傳error狀態(monkeypatch: pytest.Monke
 def test_analyze迴圈結束仍未確認產區時回傳error狀態(monkeypatch: pytest.MonkeyPatch) -> None:
     gathered = agent.GatheredData()
     monkeypatch.setattr(agent, "_get_client", lambda: object())
-    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations: (gathered, "ok"))
+    monkeypatch.setattr(agent, "run_agent_loop", lambda client, task, max_iterations, on_progress=None: (gathered, "ok"))
 
     result = agent.analyze(region="Bordeaux", year=2019)
 

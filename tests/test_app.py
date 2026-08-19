@@ -13,7 +13,7 @@ from typing import Any
 from streamlit.testing.v1 import AppTest
 
 import agent
-from src import vision
+from src import climate, vision
 
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 
@@ -72,7 +72,9 @@ def test_填妥產區與年份後按鈕啟用且按下會呼叫agent_analyze(mon
 
     assert not at.exception
     assert len(calls) == 1
-    assert calls[0] == {
+    call_kwargs = calls[0]
+    assert callable(call_kwargs.pop("on_progress"))
+    assert call_kwargs == {
         "region": "Bordeaux",
         "year": 2019,
         "label_info": {"winery": None, "grape": None},
@@ -158,6 +160,35 @@ def test_上傳有效圖片成功辨識後表單自動帶入結果(monkeypatch: 
     assert at.text_input[1].value == "Château Test"
     assert at.text_input[2].value == "Cabernet Sauvignon"
     assert at.number_input[0].value == 2018
+
+
+# --- 氣候資料取不到時圖表區顯示白話說明（T-18） ------------------------------------------
+
+
+def test_氣候資料取不到時圖表區顯示白話說明而非靜默消失(monkeypatch: Any) -> None:
+    def _raise_climate_error(*args: Any, **kwargs: Any) -> Any:
+        raise climate.ClimateDataError("氣候資料暫時無法取得，請稍後再試一次。", "測試用例外")
+
+    monkeypatch.setattr(climate, "fetch_season_climate", _raise_climate_error)
+    monkeypatch.setattr(
+        agent,
+        "analyze",
+        lambda **kw: agent.AnalysisResult(
+            status="ok",
+            markdown="## 風味推測\n測試內容\n## 資料來源\n[1] 測試來源",
+            gathered=agent.GatheredData(
+                region_canonical="測試專用不存在產區", region_zh="測試", vintage_year=2019
+            ),
+        ),
+    )
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _fill_minimum_form(at)
+    at.button[0].click().run()
+
+    assert not at.exception
+    assert "暫時無法取得" in "".join(i.value for i in at.info)
 
 
 # --- 成本控管回歸測試（條款 19，最重要） -----------------------------------------------

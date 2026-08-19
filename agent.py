@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import openai
 from dotenv import load_dotenv
@@ -46,6 +46,16 @@ USER_MESSAGE_REGION_NOT_COVERED_FALLBACK = "本系統目前不涵蓋這個產區
 TerminalState = Literal["ok", "region_not_covered", "label_no_region", "max_iterations"]
 
 AnalysisStatus = Literal["ok", "region_not_covered", "label_no_region", "error"]
+
+# 給 Streamlit 端 st.status() 顯示分段進度用的白話標籤（T-18）；CLI 路徑不傳
+# on_progress，這份對照表就完全用不到，不影響既有輸出。
+_TOOL_PROGRESS_LABELS: dict[str, str] = {
+    "recognize_wine_label": "正在辨識酒標……",
+    "check_region_validity": "正在確認產區是否有支援……",
+    "query_climate_anomaly": "正在查詢氣候距平……",
+    "query_climate_knowledge": "正在檢索氣候知識庫……",
+    "query_terroir_knowledge": "正在檢索風土知識庫……",
+}
 
 
 # --- 例外 -------------------------------------------------------------------
@@ -216,7 +226,10 @@ def _update_gathered_data(
 
 
 def _process_tool_calls(
-    tool_calls: list[Any], gathered: GatheredData, messages: list[dict[str, Any]]
+    tool_calls: list[Any],
+    gathered: GatheredData,
+    messages: list[dict[str, Any]],
+    on_progress: Callable[[str], None],
 ) -> bool:
     """處理一輪所有 tool_calls，append 對應 `role: tool` 訊息。
 
@@ -227,6 +240,7 @@ def _process_tool_calls(
     region_not_covered = False
     for tool_call in tool_calls:
         name, arguments, result = _dispatch_tool_call(tool_call)
+        on_progress(_TOOL_PROGRESS_LABELS.get(name, "正在處理資料……"))
         gathered.tool_call_log.append({"name": name, "arguments": arguments, "result": result})
         _update_gathered_data(gathered, name, result)
         messages.append(
@@ -247,7 +261,10 @@ def _label_missing_region(gathered: GatheredData) -> bool:
 
 
 def run_agent_loop(
-    client: OpenAI, user_task: str, max_iterations: int = MAX_ITERATIONS
+    client: OpenAI,
+    user_task: str,
+    max_iterations: int = MAX_ITERATIONS,
+    on_progress: Callable[[str], None] | None = None,
 ) -> tuple[GatheredData, TerminalState]:
     """執行 tool-calling agentic loop，回傳 `(蒐集到的資料, 終止狀態)`。
 
@@ -256,6 +273,8 @@ def run_agent_loop(
         user_task: 描述任務的第一則使用者訊息（見 `build_user_task_message()`）。
         max_iterations: 最大輪數上限，超過就優雅收尾（用已蒐集的資料生成報告，而不是
             掛掉或無限迴圈，對應 06_TechSetup.md §11 的踩雷點）。
+        on_progress: 選填的進度回呼，每次工具呼叫完成後帶一句白話進度文字呼叫一次，給
+            Streamlit 端的 `st.status()` 用（T-18）。CLI 路徑不傳，行為不受影響。
 
     Returns:
         `(GatheredData, TerminalState)`。`"max_iterations"` 不是錯誤，呼叫端應該跟
@@ -264,6 +283,7 @@ def run_agent_loop(
     Raises:
         AgentError: LLM API 呼叫失敗。
     """
+    emit = on_progress or (lambda _message: None)
     gathered = GatheredData()
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT},
@@ -276,7 +296,7 @@ def run_agent_loop(
 
         if not message.tool_calls:
             return gathered, "ok"
-        if _process_tool_calls(message.tool_calls, gathered, messages):
+        if _process_tool_calls(message.tool_calls, gathered, messages, emit):
             return gathered, "region_not_covered"
         if _label_missing_region(gathered):
             return gathered, "label_no_region"
@@ -328,6 +348,7 @@ def analyze(
     image_path: str | None = None,
     label_info: dict[str, Any] | None = None,
     max_iterations: int = MAX_ITERATIONS,
+    on_progress: Callable[[str], None] | None = None,
 ) -> AnalysisResult:
     """跑完整的資料蒐集＋報告生成流程，回傳結構化結果供 CLI 與 Streamlit 共用。
 
@@ -342,6 +363,7 @@ def analyze(
         image_path: 酒標照片的本機路徑，與 `region`/`year` 二擇一。
         label_info: 已確認的酒標辨識結果（酒莊、品種等），優先於 agent loop 蒐集到的版本。
         max_iterations: Agent tool-calling 迴圈的最大輪數上限。
+        on_progress: 選填的進度回呼，見 `run_agent_loop()`；CLI 路徑不傳，行為不變。
 
     Returns:
         `AnalysisResult`，`status="ok"` 時 `markdown` 有值，其餘狀態 `user_message` 有值。
@@ -349,7 +371,7 @@ def analyze(
     task_message = _build_task_message(image_path=image_path, region=region, year=year)
     try:
         client = _get_client()
-        gathered, state = run_agent_loop(client, task_message, max_iterations)
+        gathered, state = run_agent_loop(client, task_message, max_iterations, on_progress)
     except AgentError as exc:
         logger.error("技術細節：%s", exc.technical_detail)
         return AnalysisResult(status="error", user_message=exc.user_message)
@@ -364,6 +386,9 @@ def analyze(
         return AnalysisResult(
             status="error", user_message=USER_MESSAGE_AGENT_FAILED, gathered=gathered
         )
+
+    if on_progress:
+        on_progress("正在生成報告……")
 
     try:
         markdown = report.generate_report(

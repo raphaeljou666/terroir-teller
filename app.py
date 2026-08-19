@@ -29,9 +29,6 @@ logger = logging.getLogger(__name__)
 
 MIN_VINTAGE_YEAR = 1940
 
-USER_MESSAGE_BAD_FORMAT = "這張圖片的格式看起來不是 JPG 或 PNG，請重新拍照或選擇其他檔案。"
-USER_MESSAGE_TOO_LARGE = "這張圖片檔案太大了（超過 5MB），請重新拍照或壓縮後再試。"
-
 
 def _init_session_state() -> None:
     """初始化這次 session 需要的欄位，只在第一次執行時設定預設值。"""
@@ -41,14 +38,31 @@ def _init_session_state() -> None:
     )
     st.session_state.setdefault("result", None)
     st.session_state.setdefault("upload_warning", None)
+    st.session_state.setdefault("temp_image_path", None)
 
 
 def _temp_image_path(uploaded_file: Any) -> Path:
-    """把上傳的圖片寫進系統暫存目錄，回傳路徑給 `vision.recognize_label()` 使用。"""
+    """把上傳的圖片寫進系統暫存目錄，回傳路徑給 `vision.recognize_label()` 使用。
+
+    上一張圖片對應的暫存檔在這裡順便清掉（路徑存在 `st.session_state.temp_image_path`）
+    ——絕不會刪到正在使用的檔案，因為刪除的一定是「上一輪」寫入的舊檔，這次要用的新檔
+    還沒建立。單機 demo 用途，session 結束時最後一張圖片的暫存檔不會被清（作業系統的
+    暫存目錄本身會定期清理），這是刻意接受的低風險殘留，不是遺漏。
+    """
+    previous_path = st.session_state.get("temp_image_path")
+    if previous_path is not None:
+        try:
+            Path(previous_path).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("清理舊暫存圖片失敗（不影響本次流程）：%r", exc)
+
     suffix = Path(uploaded_file.name).suffix or ".jpg"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
         handle.write(uploaded_file.getvalue())
-        return Path(handle.name)
+        new_path = Path(handle.name)
+
+    st.session_state.temp_image_path = str(new_path)
+    return new_path
 
 
 def _run_vision_recognition(image_path: str) -> dict[str, Any] | None:
@@ -83,9 +97,9 @@ def render_upload_section() -> None:
         st.session_state.upload_warning = None
 
         if Path(image_file.name).suffix.lower() not in vision.ALLOWED_EXTENSIONS:
-            st.session_state.upload_warning = USER_MESSAGE_BAD_FORMAT
+            st.session_state.upload_warning = vision.USER_MESSAGE_BAD_FORMAT
         elif len(image_file.getvalue()) > vision.MAX_IMAGE_SIZE_BYTES:
-            st.session_state.upload_warning = USER_MESSAGE_TOO_LARGE
+            st.session_state.upload_warning = vision.USER_MESSAGE_TOO_LARGE
 
     if st.session_state.upload_warning:
         return
@@ -95,7 +109,7 @@ def render_upload_section() -> None:
         st.image(thumbnail_bytes, caption="已上傳的酒標", width=240)
     except Exception as exc:  # noqa: BLE001 — st.image 對無法解碼的內容拋的例外型別不固定
         logger.error("縮圖顯示失敗，技術細節：%r", exc)
-        st.session_state.upload_warning = USER_MESSAGE_BAD_FORMAT
+        st.session_state.upload_warning = vision.USER_MESSAGE_BAD_FORMAT
         return
 
     if not is_new_file:
@@ -147,11 +161,17 @@ def render_label_form() -> tuple[bool, dict[str, Any]]:
 
 
 def run_analysis(values: dict[str, Any]) -> None:
-    """按鈕按下後呼叫，包在 spinner 裡執行 `agent.analyze()`，結果存進 `session_state`。"""
+    """按鈕按下後呼叫，用 `st.status()` 顯示分段進度執行 `agent.analyze()`，結果存進
+    `session_state`。
+
+    Agent loop 背後是多次 tool call 加上報告生成，10 秒以上很常見，一個不透明的 spinner
+    在手機網路下尤其讓人不安；用 `on_progress` 回呼把每個階段的白話標籤即時更新到畫面上
+    （T-18）。
+    """
     region = values["region"].strip()
     year = int(values["vintage"])
     logger.info("呼叫 agent.analyze()：region=%r, year=%r", region, year)
-    with st.spinner("正在查氣候資料與知識庫……"):
+    with st.status("正在分析氣候與風味資料……", expanded=True) as status:
         st.session_state.result = agent.analyze(
             region=region,
             year=year,
@@ -159,7 +179,9 @@ def run_analysis(values: dict[str, Any]) -> None:
                 "winery": (values.get("winery") or "").strip() or None,
                 "grape": (values.get("grape") or "").strip() or None,
             },
+            on_progress=lambda message: status.update(label=message),
         )
+        status.update(label="分析完成", state="complete")
 
 
 def render_report(result: agent.AnalysisResult) -> None:
@@ -194,6 +216,7 @@ def render_charts(gathered: agent.GatheredData) -> None:
 
     comparison = _load_monthly_comparison(gathered.region_canonical, gathered.vintage_year)
     if comparison is None:
+        st.info("這個產區與年份的氣候距平圖表資料暫時無法取得，不影響上面的風味推測報告。")
         return
 
     st.subheader("氣候距平圖表")
