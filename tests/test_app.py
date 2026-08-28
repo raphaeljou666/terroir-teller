@@ -10,9 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+import pytest
 from streamlit.testing.v1 import AppTest
 
 import agent
+import app
 from src import climate, vision
 
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -244,3 +247,66 @@ def test_已有結果後編輯欄位觸發rerun不會重複呼叫agent_analyze(m
 
     at.number_input[0].set_value(2020).run()  # 再編輯一個欄位
     assert len(calls) == 1, "編輯表單欄位觸發的 rerun 不應該再打一次 agent.analyze()"
+
+
+# --- 逐月距平圖（T-23 改版） -----------------------------------------------------------
+
+
+def _fake_comparison() -> pd.DataFrame:
+    """手刻一份逐月比較資料，正負距平都有，不需要真實 API 或快取。"""
+    return pd.DataFrame({
+        "month": [4, 5, 6],
+        "month_label": ["4月", "5月", "6月"],
+        "temp_mean_vintage": [12.0, 14.5, 20.0],
+        "temp_mean_baseline": [12.5, 16.0, 19.5],      # 距平：-0.5, -1.5, +0.5
+        "precipitation_mm_vintage": [80.0, 45.0, 85.0],
+        "precipitation_mm_baseline": [70.0, 73.0, 66.0],  # 距平：+10, -28, +19
+    })
+
+
+def test_距平圖畫的是差值而不是原始序列() -> None:
+    fig = app._build_anomaly_chart(_fake_comparison(), "2019 年", "light")
+    temp_bar, rain_bar = fig.data
+    assert list(temp_bar.y) == pytest.approx([-0.5, -1.5, 0.5])
+    assert list(rain_bar.y) == pytest.approx([10.0, -28.0, 19.0])
+
+
+def test_距平圖用正負決定顏色而不是用序列身分() -> None:
+    fig = app._build_anomaly_chart(_fake_comparison(), "2019 年", "light")
+    above, below = app.ABOVE_COLOR["light"], app.BELOW_COLOR["light"]
+    temp_bar, rain_bar = fig.data
+    assert list(temp_bar.marker.color) == [below, below, above]
+    assert list(rain_bar.marker.color) == [above, below, above]
+
+
+def test_溫度與降雨分成上下兩排而不是共用雙y軸() -> None:
+    """單位不同的兩個指標疊在同一張圖的兩個 y 軸上，交叉點會變成視覺巧合。"""
+    fig = app._build_anomaly_chart(_fake_comparison(), "2019 年", "light")
+    assert len(fig.data) == 2
+    assert fig.data[0].yaxis != fig.data[1].yaxis
+    assert fig.data[0].xaxis != fig.data[1].xaxis  # 上下兩排各自的子圖軸
+
+
+def test_距平圖關閉縮放以免使用者縮不回原本範圍() -> None:
+    """原始回饋：放大後沒有明顯方式縮回，觸控裝置上雙擊重置不直覺。"""
+    fig = app._build_anomaly_chart(_fake_comparison(), "2019 年", "light")
+    layout = fig.layout.to_plotly_json()
+    axes = [v for k, v in layout.items() if k.startswith(("xaxis", "yaxis"))]
+    assert axes, "應該要有座標軸設定"
+    for axis in axes:
+        assert axis.get("fixedrange") is True
+
+
+@pytest.mark.parametrize("theme_type", ["light", "dark"])
+def test_亮暗兩種模式都取得到配色(theme_type: str) -> None:
+    fig = app._build_anomaly_chart(_fake_comparison(), "2019 年", theme_type)
+    used = set(fig.data[0].marker.color) | set(fig.data[1].marker.color)
+    assert used <= {app.ABOVE_COLOR[theme_type], app.BELOW_COLOR[theme_type]}
+
+
+def test_距平表格提供圖表之外的第二種讀法() -> None:
+    """色彩與柱長之外，數字本身也要拿得到，不讓 tooltip 成為唯一入口。"""
+    table = app._build_deviation_table(_fake_comparison())
+    assert list(table.columns) == ["月份", "均溫距平（°C）", "降雨距平（mm）"]
+    assert list(table["均溫距平（°C）"]) == pytest.approx([-0.5, -1.5, 0.5])
+    assert list(table["降雨距平（mm）"]) == pytest.approx([10.0, -28.0, 19.0])
