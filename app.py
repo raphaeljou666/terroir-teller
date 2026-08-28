@@ -233,6 +233,50 @@ def render_anomaly_metrics(anomaly: dict[str, Any] | None) -> None:
         )
 
 
+def _export_filename(gathered: agent.GatheredData) -> str:
+    """組出下載檔名，例：`TerroirTeller_Napa-Valley_2018.md`。
+
+    產區用正式英文名稱（空白換成連字號），避免中文檔名在不同作業系統的編碼問題。
+    """
+    region = (gathered.region_canonical or "unknown").replace(" ", "-")
+    year = gathered.vintage_year or "unknown"
+    return f"TerroirTeller_{region}_{year}.md"
+
+
+def _build_export_markdown(result: agent.AnalysisResult, today: date) -> str:
+    """把報告加上抬頭資訊組成可獨立閱讀的 Markdown 檔內容。
+
+    匯出的檔案會離開這個 app 被單獨閱讀或轉傳，所以抬頭要能自我說明：這是什麼、哪個產區
+    與年份、什麼時候產生的，以及最重要的——這是氣候推論不是品飲筆記。少了最後這句，一份
+    脫離脈絡的檔案很容易被當成品酒評鑑看待。
+
+    Args:
+        result: 成功狀態的分析結果。
+        today: 產生日期，由呼叫端傳入方便測試。
+
+    Returns:
+        完整的 Markdown 檔案內容。
+    """
+    gathered = result.gathered
+    region = gathered.region_canonical or "未知產區"
+    region_zh = f"（{gathered.region_zh}）" if gathered.region_zh else ""
+    year = gathered.vintage_year or "未知年份"
+
+    header = "\n".join([
+        f"# {region}{region_zh} {year} 年份氣候與風味推測",
+        "",
+        f"- 產生日期：{today.isoformat()}（當地時間）",
+        "- 產生工具：TerroirTeller",
+        "- 這份報告是**從氣候資料推論**出來的風味傾向，不是實際品飲筆記。氣候只是影響風味"
+        "的其中一個因子，酒莊工藝與採收時機並未納入。",
+        "",
+        "---",
+        "",
+        "",
+    ])
+    return header + (result.markdown or "")
+
+
 def render_report(result: agent.AnalysisResult) -> None:
     """依 `result.status` 分支渲染：成功顯示報告＋圖表，其餘顯示白話說明（US-4.1）。"""
     if result.status != "ok" or result.markdown is None:
@@ -245,6 +289,15 @@ def render_report(result: agent.AnalysisResult) -> None:
     render_charts(result.gathered)
     with st.expander("資料來源", expanded=True):
         st.markdown(sources or "本次報告未能引用任何具體知識庫片段或氣候資料。")
+
+    # 下載按鈕點擊會觸發 rerun，但分析只寫在「開始分析」按鈕的分支裡、結果存在
+    # session_state，所以不會重跑付費 API（條款 19，tests/test_app.py 有回歸測試）。
+    st.download_button(
+        "下載這份報告（Markdown）",
+        data=_build_export_markdown(result, date.today()).encode("utf-8"),
+        file_name=_export_filename(result.gathered),
+        mime="text/markdown",
+    )
 
 
 @st.cache_data(show_spinner=False)

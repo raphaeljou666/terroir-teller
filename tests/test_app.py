@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -310,3 +311,58 @@ def test_距平表格提供圖表之外的第二種讀法() -> None:
     assert list(table.columns) == ["月份", "均溫距平（°C）", "降雨距平（mm）"]
     assert list(table["均溫距平（°C）"]) == pytest.approx([-0.5, -1.5, 0.5])
     assert list(table["降雨距平（mm）"]) == pytest.approx([10.0, -28.0, 19.0])
+
+
+# --- 匯出 Markdown（T-19） -------------------------------------------------------------
+
+
+def test_匯出檔名含產區與年份且空白換成連字號() -> None:
+    gathered = agent.GatheredData(
+        region_canonical="Napa Valley", region_zh="納帕谷", vintage_year=2018
+    )
+    assert app._export_filename(gathered) == "TerroirTeller_Napa-Valley_2018.md"
+
+
+def test_匯出內容保留原報告全文並加上可自我說明的抬頭() -> None:
+    result = _fake_ok_result()
+    content = app._build_export_markdown(result, date(2026, 8, 28))
+
+    assert result.markdown in content, "原報告全文要完整保留，不能被抬頭取代"
+    assert "Bordeaux（波爾多） 2019 年份" in content
+    assert "2026-08-28" in content  # 條款 28：日期一律 YYYY-MM-DD
+    assert "當地時間" in content  # 條款 29：時區要明確標註
+    # 檔案會離開 app 被單獨閱讀，必須自己講清楚這不是品飲筆記。
+    assert "不是實際品飲筆記" in content
+
+
+def test_匯出抬頭在缺欄位時不拋例外() -> None:
+    result = agent.AnalysisResult(
+        status="ok", markdown="## 風味推測\n內容", gathered=agent.GatheredData()
+    )
+    content = app._build_export_markdown(result, date(2026, 8, 28))
+    assert "未知產區" in content
+    assert app._export_filename(result.gathered) == "TerroirTeller_unknown_unknown.md"
+
+
+def test_下載按鈕出現且點擊不會重複呼叫agent_analyze(monkeypatch: Any) -> None:
+    """條款 19 成本控管：download_button 觸發的 rerun 不可以重跑付費 API。"""
+    calls: list[dict[str, Any]] = []
+
+    def _spy(**kwargs: Any) -> agent.AnalysisResult:
+        calls.append(kwargs)
+        return _fake_ok_result()
+
+    monkeypatch.setattr(agent, "analyze", _spy)
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _fill_minimum_form(at)
+    at.button[0].click().run()
+    assert len(calls) == 1
+
+    assert len(at.download_button) == 1
+    assert at.download_button[0].label == "下載這份報告（Markdown）"
+
+    at.download_button[0].click().run()
+    assert not at.exception
+    assert len(calls) == 1, "下載按鈕觸發的 rerun 不應該再打一次 agent.analyze()"
