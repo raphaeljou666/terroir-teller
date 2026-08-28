@@ -160,6 +160,58 @@ def test_build_climate_context明確標出溫度方向(direction: str | None, ex
     assert expected in report._build_climate_context(anomaly)
 
 
+def _anomaly_with_direction(direction: str | None) -> dict[str, Any]:
+    """組一份指定溫度方向的距平 dict，供代理指標權重的測試使用。"""
+    return {
+        "summary": "摘要",
+        "temperature_direction": direction,
+        "baseline_start_year": 1991,
+        "baseline_end_year": 2020,
+        "gdd": {"pct_anomaly": 6.3, "z_score": 0.8},
+        "season_precipitation": {"pct_anomaly": 6.9, "z_score": 0.3},
+        "pre_harvest_precipitation": {"pct_anomaly": 55.7, "z_score": 1.6},
+        "harvest_proxy_window_start": "2019-10-02",
+        "harvest_proxy_window_end": "2019-10-31",
+    }
+
+
+def test_採收前降雨被標為次要參考而非與主要證據平鋪並列() -> None:
+    """2019 Bordeaux 把代理值 +55.7% 放大成全文主軸，就是平鋪並列造成的。"""
+    context = report._build_climate_context(_anomaly_with_direction("warmer"))
+    assert "【主要證據】" in context
+    assert "【次要參考】" in context
+    # 主要證據區塊要排在次要參考之前，模型才不會先讀到代理值。
+    assert context.index("【主要證據】") < context.index("【次要參考】")
+
+
+def test_偏暖年份附上早熟提醒() -> None:
+    context = report._build_climate_context(_anomaly_with_direction("warmer"))
+    assert "採收「之後」" in context
+
+
+@pytest.mark.parametrize("direction", ["cooler", None])
+def test_非偏暖年份不觸發早熟提醒(direction: str | None) -> None:
+    """避免重演 ERA5 山區提醒的老問題——條件式提醒不能對不相關的年份過度觸發。
+
+    偏涼年份成熟慢、採收本來就晚，代理視窗落在採收之後的疑慮不成立。
+    """
+    context = report._build_climate_context(_anomaly_with_direction(direction))
+    assert "採收「之後」" not in context
+    # 但代理指標本身仍要標示為次要參考。
+    assert "【次要參考】" in context
+
+
+def test_report_prompt要求以主要證據為主軸() -> None:
+    assert "不可以當成整份報告的主軸" in report.REPORT_SYSTEM_PROMPT
+    assert "主要證據為準" in report.REPORT_SYSTEM_PROMPT
+
+
+def test_report_prompt禁止任何形式的陳年潛力判斷() -> None:
+    """拒答清單第 5 項原本只擋「具體年份預測」，模型仍寫出定性的陳年潛力說法。"""
+    assert "陳年潛力可能受到" in report.REPORT_SYSTEM_PROMPT
+    assert "有利於陳年" in report.REPORT_SYSTEM_PROMPT
+
+
 def test_report_prompt禁止把規則的通用數字當成實測值() -> None:
     """2013 那句「高出0.5至2°C」逐字抄自 warm_wet.md 的情境條件，這條規則是直接對策。"""
     assert "不是這一年的實測值" in report.REPORT_SYSTEM_PROMPT

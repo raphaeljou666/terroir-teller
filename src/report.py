@@ -102,6 +102,17 @@ REPORT_SYSTEM_PROMPT = """\
 提供的知識片段裡找不到支持，就不要在風味推測寫這個說法，改成在 `limitations` 裡誠實
 說明依據不足，`cited_ids` 也不要為了湊數而亂填。
 
+## 證據的輕重不一樣
+
+氣候距平資料分成「主要證據」與「次要參考」兩塊，寫作時的權重要跟著不同：
+
+- **GDD（生長積溫）與生長季總降雨是主要證據**，風味推測的主軸要建立在這兩項上。
+- **採收前30天降雨是次要參考**，它是用生長季結束日往前推算的代理值，不是實際採收日的
+  觀測資料。它可以拿來補充細節，但**不可以當成整份報告的主軸**，也不要因為它的百分比
+  數字看起來最大就環繞著它寫。
+- 當次要參考與主要證據的方向衝突時（例如 GDD 明顯偏暖、但代理值顯示降雨偏多），**以
+  主要證據為準**，次要參考最多提一句，並說明它的不確定性。
+
 ## 知識片段裡的數字不是這一年的實測值
 
 知識庫片段描述的是「通用規則」，裡面的數字（例如「生長季均溫比 30 年基準線高 0.5–2°C」
@@ -139,7 +150,9 @@ REPORT_SYSTEM_PROMPT = """\
 2. 評分或排名，包括引用外部評鑑分數（如 Parker Points）
 3. 「好不好喝」「值不值得買」之類的價值判斷，只描述風味特徵的傾向
 4. 搭餐配對建議
-5. 具體的陳年年份或窗口預測，只能泛稱風味傾向
+5. 任何形式的陳年潛力判斷——不只是「還能放幾年」這種具體預測，連「陳年潛力可能受到
+   影響」「有利於陳年」「適合久放」這類定性說法也一律不要寫。只描述風味特徵本身（例如
+   酸度偏高、單寧偏緊），不要延伸推論它對陳年的影響
 6. 發酵溫度、橡木桶種類等釀造工藝細節
 7. 針對特定酒莊的個別評論，只談產區共通特性
 8. 這一項系統呼叫你之前已經用程式檢查過產區是否在支援清單內，這裡不需要額外處理
@@ -197,21 +210,57 @@ def _build_climate_context(anomaly: dict[str, Any] | None) -> str:
 
     lines.append(f"基準線區間：{anomaly['baseline_start_year']}–{anomaly['baseline_end_year']} 年")
 
+    lines.append("【主要證據】以下兩項是實際觀測值，風味推測應以它們為主軸：")
     for metric_key, label in (
         ("gdd", "GDD（生長積溫）"),
         ("season_precipitation", "生長季總降雨"),
-        ("pre_harvest_precipitation", "採收前30天降雨代理值"),
     ):
-        metric = anomaly[metric_key]
-        pct_str = f"{metric['pct_anomaly']:+.1f}%" if metric["pct_anomaly"] is not None else "無法計算"
-        z_str = f"{metric['z_score']:+.2f}" if metric["z_score"] is not None else "無法計算"
-        lines.append(f"{label}：距平 {pct_str}，z-score {z_str}")
+        lines.append(f"{label}：{_format_metric_anomaly(anomaly[metric_key])}")
 
-    lines.append(
-        f"採收前降雨代理值計算區間：{anomaly['harvest_proxy_window_start']} 至 "
-        f"{anomaly['harvest_proxy_window_end']}（用生長季結束日往前推算，非實際採收日）"
-    )
+    lines.extend(_build_harvest_proxy_block(anomaly))
     return "\n".join(lines)
+
+
+def _format_metric_anomaly(metric: dict[str, Any]) -> str:
+    """把單一指標的距平與 z-score 格式化成一行。"""
+    pct_str = f"{metric['pct_anomaly']:+.1f}%" if metric["pct_anomaly"] is not None else "無法計算"
+    z_str = f"{metric['z_score']:+.2f}" if metric["z_score"] is not None else "無法計算"
+    return f"距平 {pct_str}，z-score {z_str}"
+
+
+def _build_harvest_proxy_block(anomaly: dict[str, Any]) -> list[str]:
+    """組出採收前降雨代理指標的區塊，明確標成次要證據。
+
+    T-16 驗證案例 5（2019 Bordeaux）顯示，把這個指標跟 GDD、生長季降雨平鋪並列時，模型
+    會抓住百分比最大的那個當主軸——該年代理值 +55.7%，於是整份報告變成稀釋敘事，最後推
+    出「陳年潛力受影響」的結論，跟公開評論把 2019 陳年潛力當賣點的共識完全相反。
+
+    偏暖年份另外附一句早熟提醒：代理視窗固定是生長季結束日往前 30 天，偏暖年份成熟快、
+    實際採收通常早於生長季結束日，這個視窗抓到的很可能是採收「之後」才下的秋雨。2019
+    Bordeaux（10 月 106.9mm，是七個月裡最高）與 2003 Bordeaux（代理值 +81%，但該年八月
+    底就採收完畢）都是這個形狀。偏涼年份成熟慢、採收本來就晚，不需要這句提醒，所以用
+    `temperature_direction` 決定要不要加——沿用既有的分類邏輯，不另外發明門檻。
+
+    Args:
+        anomaly: 距平結果 dict。
+
+    Returns:
+        要接到氣候區塊後面的文字行。
+    """
+    lines = [
+        "【次要參考】採收前30天降雨「代理值」——這是可信度較低的輔助指標，不是實際採收日"
+        "的觀測資料：",
+        f"採收前30天降雨代理值：{_format_metric_anomaly(anomaly['pre_harvest_precipitation'])}",
+        f"代理值計算區間：{anomaly['harvest_proxy_window_start']} 至 "
+        f"{anomaly['harvest_proxy_window_end']}（用生長季結束日往前推算，非實際採收日）",
+    ]
+    if anomaly.get("temperature_direction") == "warmer":
+        lines.append(
+            "注意：這一年偏暖，葡萄成熟通常較快、實際採收多半早於生長季結束日，因此上面這段"
+            "代理視窗很可能落在採收「之後」，抓到的雨未必影響到這批果實。這項指標在本年度的"
+            "參考價值特別低，不要用它推導整體風味走向。"
+        )
+    return lines
 
 
 def _parse_sources(raw: Any) -> list[dict[str, Any]]:
