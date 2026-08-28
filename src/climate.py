@@ -83,6 +83,19 @@ GDD_BASE_TEMP_C = 10.0
 # 沒有的資料不假裝有，代理值要在輸出中明確標註）。
 HARVEST_PROXY_WINDOW_DAYS = 30
 
+# GDD 距平要超過這個百分比，才判定該年份「偏暖」或「偏涼」；落在區間內視為方向不明。
+#
+# 校準依據（T-16 驗證的 5 個實測案例，見 docs/07_ValidationReport.md）：
+# 2013 Bordeaux −3.63、2011 Napa −11.17、2003 Bordeaux +16.70、2018 Napa +3.48、
+# 2019 Bordeaux +6.28。綁死上限的是 2018 Napa 的 +3.48%——deadband 必須小於它，該年
+# 才會被正確判成偏暖。取 2.0 讓兩側都留有餘裕，5 個案例全部分類正確。
+GDD_DIRECTION_DEADBAND_PCT = 2.0
+
+# 降雨方向的 deadband 取得比溫度寬，因為降雨本身的年際變異就大得多：以 Bordeaux 的
+# 30 年基準線為例，降雨的變異係數（std/mean）約 21.6%，GDD 只有約 7.9%，差了 2.7 倍。
+# 同一個門檻套在兩者上，會讓降雨過度頻繁地被判出方向。
+PRECIP_DIRECTION_DEADBAND_PCT = 5.0
+
 # 給使用者看的統一錯誤訊息（條款 18：使用者看白話、開發者看 log）。
 USER_MESSAGE_API_FAILED = "氣候資料暫時無法取得，請稍後再試一次。"
 USER_MESSAGE_NO_DATA = "這個產區與年份目前查不到氣候資料，請換一個年份看看。"
@@ -1088,6 +1101,85 @@ def format_anomaly_summary(anomaly: ClimateAnomaly) -> str:
     if missing_notes:
         lines.append("註：" + "；".join(missing_notes) + "，以上計算已排除缺值天數。")
     return "\n".join(lines)
+
+
+# --- T-16 後續修正：氣候方向分類與確定性查詢字串 ---------------------------------
+
+
+def classify_gdd_direction(anomaly: ClimateAnomaly) -> str | None:
+    """依 GDD 距平判定該年份偏暖或偏涼，回傳知識庫 frontmatter 使用的英文詞彙。
+
+    方向由程式從距平數字算出來，不交給 LLM 判斷——這是 T-16 驗證發現的核心問題：
+    2013 Bordeaux（GDD −3.6%）與 2011 Napa（−11.2%）兩個偏涼年份都被檢索到偏暖規則，
+    因為當時方向完全靠語意相似度決定。回傳值刻意對齊 `climate_rules/` 的
+    `condition.temperature` 詞彙（`warmer`／`cooler`），可直接餵給 Chroma 的 `where`。
+
+    Args:
+        anomaly: 完整的距平結果。
+
+    Returns:
+        `"warmer"`、`"cooler"`，或方向不明時回傳 `None`（距平落在 deadband 內，或
+        `pct_anomaly` 因基準值為 0 而無法計算）。`None` 表示不要施加方向過濾，讓檢索
+        退回純語意相似度，而不是硬猜一個方向。
+    """
+    pct = anomaly.gdd.pct_anomaly
+    if pct is None or abs(pct) < GDD_DIRECTION_DEADBAND_PCT:
+        return None
+    return "warmer" if pct > 0 else "cooler"
+
+
+def _describe_precipitation_direction(anomaly: ClimateAnomaly) -> str:
+    """把生長季降雨距平轉成查詢字串用的方向詞。"""
+    pct = anomaly.season_precipitation.pct_anomaly
+    if pct is None or abs(pct) < PRECIP_DIRECTION_DEADBAND_PCT:
+        return "降雨接近平均"
+    return "降雨偏多" if pct > 0 else "降雨偏少"
+
+
+def format_direction_query(anomaly: ClimateAnomaly) -> str:
+    """組出帶明確方向詞的檢索查詢句，取代原本直接拿 `format_anomaly_summary()` 當查詢。
+
+    刻意不沿用 `_describe_pct_anomaly()` 的「高」／「少」措辭：那兩個字被產區名、年份、
+    百分比數字稀釋後，在向量空間裡幾乎帶不動方向訊號（T-16 根因診斷）。這裡改用知識庫
+    規則本身使用的「偏暖」「偏涼」「降雨偏多」等措辭，讓查詢向量跟目標規則的用字對齊。
+
+    溫度方向另外會透過 metadata `where` 硬過濾，這個字串主要負責降雨軸的軟訊號——降雨
+    刻意不硬篩，因為 10 則規則在「溫度 × 降雨」網格上有缺口（沒有 warm_normal），硬篩
+    會讓降雨接近平均的年份（如 2003 Bordeaux）幾乎沒有規則存活。
+
+    Args:
+        anomaly: 完整的距平結果。
+
+    Returns:
+        例如「生長季偏涼、降雨偏多的年份，對葡萄成熟度與風味的影響」。
+    """
+    direction = classify_gdd_direction(anomaly)
+    temperature_phrase = {"warmer": "偏暖", "cooler": "偏涼"}.get(direction, "溫度接近平均")
+    return (
+        f"生長季{temperature_phrase}、{_describe_precipitation_direction(anomaly)}的年份，"
+        "對葡萄成熟度與風味的影響"
+    )
+
+
+def build_anomaly_payload(anomaly: ClimateAnomaly) -> dict[str, Any]:
+    """把距平結果轉成下游共用的 dict，附上摘要、溫度方向與確定性查詢字串。
+
+    `src/tools.py` 的工具 dispatch 與 `src/report.py` 的獨立 CLI 原本各自組一次
+    `to_dict()` + `summary`，兩邊很容易改一處漏改另一處。方向欄位加進來之後這個風險更
+    明顯，因此收斂成同一個函式。
+
+    Args:
+        anomaly: 完整的距平結果。
+
+    Returns:
+        距平 dict，額外含 `summary`、`temperature_direction`、`direction_query` 三個欄位。
+        `temperature_direction` 為 `None` 時表示方向不明，下游不應施加方向過濾。
+    """
+    payload = anomaly.to_dict()
+    payload["summary"] = format_anomaly_summary(anomaly)
+    payload["temperature_direction"] = classify_gdd_direction(anomaly)
+    payload["direction_query"] = format_direction_query(anomaly)
+    return payload
 
 
 # --- 逐月比較（T-15 圖表） ----------------------------------------------------

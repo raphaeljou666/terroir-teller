@@ -127,8 +127,9 @@ ORCHESTRATOR_SYSTEM_PROMPT = """\
 2. 一定要先呼叫 check_region_validity 確認產區在系統支援的20個產區清單內，才能繼續下
    一步。
 3. 產區確認合法後，呼叫 query_climate_anomaly 取得氣候距平（需要產區與年份）。
-4. 用氣候距平的重點（例如「偏暖偏乾」）組成一句查詢語句，呼叫 query_climate_knowledge，
-   n_results 設為 3。
+4. 呼叫 query_climate_knowledge，n_results 設為 3。query_text 隨意帶一句描述該年氣候的
+   話即可，系統會用氣候距平算出來的方向自動覆寫它——你不需要、也不應該自己判斷這一年
+   是偏暖還是偏涼。
 5. query_terroir_knowledge 只在明確需要風土或產區比較資訊時才呼叫，這個單一輪次的流程
    通常用不到，不用勉強呼叫它。
 
@@ -187,14 +188,55 @@ def _message_to_dict(message: Any) -> dict[str, Any]:
 # --- Tool dispatch 與資料蒐集 -------------------------------------------------------
 
 
-def _dispatch_tool_call(tool_call: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    """解析並執行單一 tool_call，回傳 `(工具名稱, 參數, 結果)`。"""
+def _inject_derived_arguments(
+    name: str, arguments: dict[str, Any], gathered: GatheredData | None
+) -> None:
+    """把程式算出來的事實覆寫進 LLM 給的工具參數（就地修改 `arguments`）。
+
+    目前只處理 `query_climate_knowledge` 的氣候方向：T-16 驗證發現讓模型自己從距平數字
+    推「偏暖／偏涼」很不可靠，兩個偏涼年份都被寫成偏暖、檢索到方向相反的規則。方向改由
+    `climate.classify_gdd_direction()` 從 GDD 距平算出來，連查詢字串一起覆寫。
+
+    還沒蒐集到距平資料時（模型不照標準流程、先查知識庫再查距平）不注入，行為退回原狀，
+    只留一筆 warning——這種情況下沒有方向可以算，硬猜一個方向反而更糟（條款 15）。
+
+    Args:
+        name: 工具名稱。
+        arguments: LLM 給的參數 dict，會被就地修改。
+        gathered: 迴圈目前已蒐集到的資料；`None` 表示呼叫端沒有提供。
+    """
+    if name != "query_climate_knowledge":
+        return
+
+    anomaly = gathered.anomaly if gathered else None
+    if not anomaly:
+        logger.warning("尚未取得氣候距平就呼叫 query_climate_knowledge，這次不注入方向過濾")
+        return
+
+    arguments["temperature_direction"] = anomaly.get("temperature_direction")
+    direction_query = anomaly.get("direction_query")
+    if direction_query:
+        arguments["query_text"] = direction_query
+
+
+def _dispatch_tool_call(
+    tool_call: Any, gathered: GatheredData | None = None
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """解析並執行單一 tool_call，回傳 `(工具名稱, 參數, 結果)`。
+
+    Args:
+        tool_call: OpenAI 回傳的單一 tool call 物件。
+        gathered: 迴圈目前已蒐集到的資料，用於注入程式推導出來的參數（見
+            `_inject_derived_arguments()`）。預設 `None` 表示不注入。
+    """
     name = tool_call.function.name
     try:
         arguments = json.loads(tool_call.function.arguments or "{}")
     except json.JSONDecodeError:
         logger.warning("工具呼叫參數無法解析為 JSON：%r", tool_call.function.arguments)
         arguments = {}
+
+    _inject_derived_arguments(name, arguments, gathered)
 
     dispatch_fn = tools.TOOL_DISPATCH.get(name)
     if dispatch_fn is None:
@@ -239,7 +281,7 @@ def _process_tool_calls(
     """
     region_not_covered = False
     for tool_call in tool_calls:
-        name, arguments, result = _dispatch_tool_call(tool_call)
+        name, arguments, result = _dispatch_tool_call(tool_call, gathered)
         on_progress(_TOOL_PROGRESS_LABELS.get(name, "正在處理資料……"))
         gathered.tool_call_log.append({"name": name, "arguments": arguments, "result": result})
         _update_gathered_data(gathered, name, result)

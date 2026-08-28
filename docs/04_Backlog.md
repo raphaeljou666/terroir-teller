@@ -199,6 +199,57 @@
 >   避免在沒有把握修好、也沒有預算重新跑驗證的情況下改動已上線的邏輯（條款 19、24）。
 >   後續追蹤：新開 Backlog 項目「climate_rules 檢索精準度改善（偏冷年份方向誤判）」。
 
+| ID | 任務 | 狀態 | 預估 | 依賴 | 驗收條件 |
+|---|---|---|---|---|---|
+| T-21 | climate_rules 檢索方向過濾（修 T-16 偏冷年份誤判） | ✅ 完成 | 3h | T-16 | 偏涼年份檢索到偏涼規則，2013 Bordeaux／2011 Napa 方向翻正 |
+
+> **T-21 實作備註**
+>
+> - **T-16 當時「不是一行程式碼能修好」的判斷是錯的**，這裡更正。當初只測了不同查詢語句
+>   的排序，沒往下查 metadata 匯入過程。真正的機制是 `_flatten_metadata_value()` 把 dict
+>   一律 `json.dumps()`，規則的 `condition.temperature` 被壓成不透明 JSON 字串，Chroma 的
+>   `where` 看不進字串內部——方向從來不是「排序不準」，是**根本無從過濾**，10 則規則對任何
+>   年份都永遠是候選。修法：匯入時額外攤平出 `condition_temperature` 等純量欄位（原本的
+>   JSON `condition` 欄位保留），方向改用 `where` 硬過濾。
+> - **降雨軸刻意不硬篩**。2003 Bordeaux 的生長季降雨距平是 +0.0%（`normal`），若溫度與
+>   降雨一起硬篩，10 則規則只剩 `rule_hail_10` 存活：
+>
+>   | 規則 | temp | precip | 溫度+降雨同時硬篩後 |
+>   |---|---|---|---|
+>   | warm_dry / warm_wet / heatwave | warmer | drier／wetter | ✗ |
+>   | harvest_rain | n/a | wetter | ✗ |
+>   | drought | n/a | drier | ✗ |
+>   | hail | n/a | n/a | ✓（只剩這則） |
+>
+>   根因是 10 則規則在「溫度 × 降雨」網格上有缺口（沒有 `warm_normal`）。在覆蓋不完整的
+>   維度上硬篩，就會把最乾淨的通過案例打壞。降雨方向改由 `climate.format_direction_query()`
+>   產生的查詢字串當軟訊號傳達。
+> - **deadband 用百分比距平不用 z-score**。實測 5 案例的 GDD z-score：2013 −0.46、2011
+>   −1.62、2003 +2.12、2018 **+0.50**、2019 +0.80。常見的 ±0.5 z 門檻會讓 2013 落在區間內
+>   判成方向不明，2018 更是剛好卡在邊界上。百分比距平的餘裕明確得多：綁死上限的是 2018 的
+>   +3.48%，取 ±2.0%。`GDD_DIRECTION_DEADBAND_PCT` 的 docstring 記了這組校準依據。
+>   降雨的 deadband 另外取 5.0%，因為降雨的年際變異本來就大得多（Bordeaux 基準線的變異
+>   係數：降雨約 21.6%、GDD 約 7.9%，差 2.7 倍）。
+> - **方向參數刻意不進 tool schema**。`CLIMATE_KNOWLEDGE_SCHEMA` 有
+>   `additionalProperties: False`，欄位不宣告模型就送不出來。分界線是「LLM 判斷出來的參數
+>   走 schema，程式算出來的事實走注入」——冷暖是 GDD 距平算出來的既定事實，讓模型用語意猜
+>   正是 T-16 失敗的根因。注入點在 `agent._inject_derived_arguments()`；還沒蒐集到距平時
+>   不注入、記 warning、退回原行為，不硬猜方向（條款 15）。
+> - **遷移順序是硬約束**：metadata 改完必須先重新匯入，`where` 才有欄位可篩。順序顛倒的話
+>   查詢不會報錯，只會靜默退化成「只剩產區片段」，很難追。`query_climate_knowledge()` 因此
+>   加了「方向過濾後零筆 climate_rule」的 warning。匯入一律用 `--ingest` 不加 `--reset`：
+>   文件 id 沒有增刪，`upsert()` 本來就會整包替換 metadata；`--reset` 會在任何 embedding
+>   呼叫之前先 `delete_collection()`，中途撞 rate limit 會留下空索引。
+> - **驗證分四層做，把成本壓在必要處**（條款 19）：離線測試 → 匯入後的 metadata 抽查 →
+>   5 案例的方向分類（$0，ERA5 已快取）→ 5 案例的檢索結果對照（只花 embedding 費用）→
+>   只對原本失敗的 2 案例跑完整 agent。另外 3 個通過案例的一致性完全取決於檢索到哪則規則，
+>   第四層已經確定性地驗過，不需要再花 LLM 費用重跑，驗證迴圈從 5 次完整跑降到 2 次。
+> - 順手修掉 `tests/test_retrieval.py` 一條死斷言：原本斷言 `rule_drought_01`，但實際 id 是
+>   `rule_drought_09`，那半條斷言一直沒有真正生效。
+> - 新增的資料完整性測試（掃過 10 則規則、斷言 `condition_temperature` 都在
+>   `{warmer, cooler, n/a}` 封閉詞彙內、且兩極都非空）是這輪最有價值的一條測試：方向過濾是
+>   硬條件，某則規則的詞彙一旦打錯就會從所有查詢結果中無聲消失、不會報錯。
+
 > **T-18 實作備註**
 >
 > - **手機拍照偏慢（結掉 T-14/T-15 備註留下的待辦）**：`src/vision.py` 新增

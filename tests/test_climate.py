@@ -546,6 +546,95 @@ def test_Bordeaux_2019_距平為正_已知暖年份的方向性檢查() -> None:
     assert anomaly.gdd.pct_anomaly > 0
 
 
+# --- 氣候方向分類（T-16 後續修正） ---------------------------------------------
+
+
+def _make_direction_anomaly(
+    gdd_pct: float | None, precip_pct: float | None = 0.0
+) -> climate.ClimateAnomaly:
+    """組一份只有距平百分比有意義的 `ClimateAnomaly`，方向分類只讀這兩個欄位。"""
+
+    def _metric(pct: float | None) -> climate.MetricAnomaly:
+        return climate.MetricAnomaly(
+            metric_name="x", vintage_value=0.0, vintage_missing_day_count=0,
+            baseline_mean=100.0, baseline_std=10.0, baseline_year_count=30,
+            baseline_missing_day_count=0, baseline_years_with_missing_data=(),
+            pct_anomaly=pct, z_score=None if pct is None else pct / 10,
+        )
+
+    return climate.ClimateAnomaly(
+        region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
+        baseline_start_year=1991, baseline_end_year=2020,
+        gdd=_metric(gdd_pct), season_precipitation=_metric(precip_pct),
+        pre_harvest_precipitation=_metric(0.0),
+        harvest_proxy_window_start="2019-10-02", harvest_proxy_window_end="2019-10-31",
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "gdd_pct", "expected"),
+    [
+        ("2013 Bordeaux", -3.63, "cooler"),
+        ("2011 Napa Valley", -11.17, "cooler"),
+        ("2003 Bordeaux", 16.70, "warmer"),
+        ("2018 Napa Valley", 3.48, "warmer"),
+        ("2019 Bordeaux", 6.28, "warmer"),
+    ],
+)
+def test_五個T16驗證案例的方向分類都正確(
+    case: str, gdd_pct: float, expected: str
+) -> None:
+    """用 docs/07_ValidationReport.md 記錄的實測距平值當回歸測試。
+
+    2018 Napa 的 +3.48% 是綁死 deadband 上限的案例：deadband 若取到 3.48 以上，這個
+    公認的偏暖年份就會被判成方向不明，檢索退回無過濾狀態。
+    """
+    anomaly = _make_direction_anomaly(gdd_pct)
+    assert climate.classify_gdd_direction(anomaly) == expected, case
+
+
+@pytest.mark.parametrize("gdd_pct", [1.99, -1.99, 0.0])
+def test_距平落在deadband內視為方向不明(gdd_pct: float) -> None:
+    assert climate.classify_gdd_direction(_make_direction_anomaly(gdd_pct)) is None
+
+
+@pytest.mark.parametrize(("gdd_pct", "expected"), [(2.0, "warmer"), (-2.0, "cooler")])
+def test_距平剛好等於deadband邊界時判定為有方向(gdd_pct: float, expected: str) -> None:
+    assert climate.classify_gdd_direction(_make_direction_anomaly(gdd_pct)) == expected
+
+
+def test_pct_anomaly為None時方向為None() -> None:
+    """基準值為 0 導致無法算百分比時，不硬猜方向（呼應條款 15）。"""
+    assert climate.classify_gdd_direction(_make_direction_anomaly(None)) is None
+
+
+@pytest.mark.parametrize(
+    ("gdd_pct", "precip_pct", "expected_phrases"),
+    [
+        (-11.17, 31.5, ("偏涼", "降雨偏多")),
+        (16.70, 0.0, ("偏暖", "降雨接近平均")),
+        (3.48, -31.4, ("偏暖", "降雨偏少")),
+        (0.0, 0.0, ("溫度接近平均", "降雨接近平均")),
+    ],
+)
+def test_查詢字串含明確方向詞而非高少措辭(
+    gdd_pct: float, precip_pct: float, expected_phrases: tuple[str, ...]
+) -> None:
+    """查詢字串要用知識庫規則的用字，不能沿用摘要句的「高」「少」。"""
+    query = climate.format_direction_query(_make_direction_anomaly(gdd_pct, precip_pct))
+    for phrase in expected_phrases:
+        assert phrase in query
+    assert "比 30 年平均" not in query
+
+
+def test_build_anomaly_payload附上方向與查詢字串欄位() -> None:
+    payload = climate.build_anomaly_payload(_make_direction_anomaly(-11.17, 31.5))
+    assert payload["temperature_direction"] == "cooler"
+    assert "偏涼" in payload["direction_query"]
+    assert "summary" in payload
+    assert payload["gdd"]["pct_anomaly"] == -11.17  # 原本的距平欄位要照樣保留
+
+
 # --- 逐月比較（T-15） --------------------------------------------------------
 
 

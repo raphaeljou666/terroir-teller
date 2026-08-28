@@ -23,6 +23,14 @@ Schema 的 `name` 用英文 snake_case（LLM function-calling 呼叫慣例），
 `query_terroir_knowledge` 的 description 明確寫「僅在使用者明確問到風土或產區比較時才
 呼叫」，把條款 36 的兩層檢索防汙染規則編碼進提示文字，這是 T-12 的 LLM 避免從氣候推論
 漂移成產區介紹的主要機制。
+
+**schema 參數與注入參數的邊界**（T-16 後續修正）：dispatch 函式的參數不一定都要出現在
+對應的 schema 裡。`dispatch_query_climate_knowledge` 的 `temperature_direction` 就刻意
+不宣告在 `CLIMATE_KNOWLEDGE_SCHEMA`——該 schema 有 `additionalProperties: False`，欄位
+不在裡面模型就送不出來，這個參數只能由 `agent._inject_derived_arguments()` 從已算好的
+氣候距平注入。分界線是：**LLM 判斷出來的參數走 schema，程式算出來的事實走注入**。氣候
+的冷暖方向是 GDD 距平算出來的既定事實，讓模型用語意去猜正是 T-16 驗證中偏涼年份被檢索
+到偏暖規則的根因。
 """
 
 from __future__ import annotations
@@ -87,14 +95,20 @@ def dispatch_query_climate_anomaly(region_name: str, vintage_year: int) -> dict[
     """`query_climate_anomaly` 工具的實際執行邏輯。
 
     依序呼叫 `climate.fetch_season_climate()`、`climate.get_baseline()`、
-    `climate.compute_climate_anomaly()`，成功時額外附上人類可讀的 `summary` 欄位。
+    `climate.compute_climate_anomaly()`，成功時交給 `climate.build_anomaly_payload()`
+    補上 `summary`、`temperature_direction`、`direction_query` 三個欄位。
+
+    `temperature_direction` 會被 `agent._update_gathered_data()` 一起存進
+    `gathered.anomaly`，讓 agent 迴圈在後續呼叫 `query_climate_knowledge` 時，能用程式
+    注入的方向取代 LLM 自己猜的方向（T-16 後續修正）。
 
     Args:
         region_name: 產區名稱或別名。
         vintage_year: 酒標上的年份。
 
     Returns:
-        成功時為距平結果 dict（含 `summary`）；失敗時為 `{"error": True, ...}`。
+        成功時為距平結果 dict（含 `summary`、`temperature_direction`、`direction_query`）；
+        失敗時為 `{"error": True, ...}`。
     """
     try:
         season = climate.fetch_season_climate(region_name, vintage_year)
@@ -102,9 +116,7 @@ def dispatch_query_climate_anomaly(region_name: str, vintage_year: int) -> dict[
         anomaly = climate.compute_climate_anomaly(season, baseline)
     except climate.ClimateDataError as exc:
         return _error_result(exc, "climate_anomaly")
-    result = anomaly.to_dict()
-    result["summary"] = climate.format_anomaly_summary(anomaly)
-    return result
+    return climate.build_anomaly_payload(anomaly)
 
 
 # --- Tool 2：氣候知識檢索 -------------------------------------------------------
@@ -142,7 +154,10 @@ CLIMATE_KNOWLEDGE_SCHEMA: dict[str, Any] = {
 
 
 def dispatch_query_climate_knowledge(
-    query_text: str, n_results: int = 5, region_canonical: str | None = None
+    query_text: str,
+    n_results: int = 5,
+    region_canonical: str | None = None,
+    temperature_direction: str | None = None,
 ) -> dict[str, Any]:
     """`query_climate_knowledge` 工具的實際執行邏輯，包裝 `retrieval.query_climate_knowledge()`。
 
@@ -150,12 +165,18 @@ def dispatch_query_climate_knowledge(
         query_text: 查詢文字。
         n_results: 回傳筆數上限。
         region_canonical: 限定產區的正式英文名稱，不限定時為 `None`。
+        temperature_direction: 氣候的溫度方向（`"warmer"`／`"cooler"`）。**刻意不在
+            `CLIMATE_KNOWLEDGE_SCHEMA` 裡宣告**，所以 LLM 送不出這個參數——它由
+            `agent._inject_derived_arguments()` 從已蒐集的距平資料注入。溫度方向是算出來
+            的事實，不是模型該判斷的事情（T-16 後續修正）。
 
     Returns:
         成功時為 `{"results": [...]}`；失敗時為 `{"error": True, ...}`。
     """
     try:
-        hits = retrieval.query_climate_knowledge(query_text, n_results, region_canonical)
+        hits = retrieval.query_climate_knowledge(
+            query_text, n_results, region_canonical, temperature_direction
+        )
     except retrieval.RetrievalError as exc:
         return _error_result(exc, "climate_knowledge_retrieval")
     return {"results": hits}
