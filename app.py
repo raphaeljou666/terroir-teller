@@ -19,6 +19,7 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 import agent
 from src import climate, vision
@@ -29,12 +30,16 @@ logger = logging.getLogger(__name__)
 
 MIN_VINTAGE_YEAR = 1940
 
-# 均溫／降雨兩張圖表固定的角色配色：橘色＝該年（比較主體）、藍色＝30 年平均（參照基準），
-# 兩張圖用同一組，不因資料而互換。依 st.context.theme.type 挑對應色階，跟 .streamlit/
-# config.toml 的主題保持同步。色碼已用 dataviz skill 的 validate_palette.js 驗證過
-# CVD 安全性與對比（亮／暗模式皆 ALL CHECKS PASS，見 T-18 實作備註）。
-VINTAGE_COLOR = {"light": "#eb6834", "dark": "#d95926"}
-BASELINE_COLOR = {"light": "#2a78d6", "dark": "#3987e5"}
+# 距平圖的發散（diverging）配色：橘色＝高於 30 年平均、藍色＝低於平均，中點為中性灰。
+# 兩個面板共用同一組規則，同一個顏色在兩張圖裡永遠代表同一件事。
+#
+# T-18 時這組色碼的角色是「該年 vs 30 年平均」的類別識別；T-23 改畫距平之後，該年與平均
+# 不再是兩條並列的序列（畫的就是兩者的差），這組色碼因此轉為表達正負極性。色碼本身沿用，
+# 已用 dataviz skill 的 validate_palette.js 對 .streamlit/config.toml 的實際底色重新驗證
+# （亮 #FFFDF9／暗 #1C1210，兩種模式皆 ALL CHECKS PASS）。
+ABOVE_COLOR = {"light": "#eb6834", "dark": "#d95926"}
+BELOW_COLOR = {"light": "#2a78d6", "dark": "#3987e5"}
+ZERO_LINE_COLOR = {"light": "#8a8a85", "dark": "#6f6f6a"}
 
 
 def _init_session_state() -> None:
@@ -254,50 +259,85 @@ def _load_monthly_comparison(region_canonical: str, vintage_year: int) -> pd.Dat
     return climate.build_monthly_comparison(season, baseline)
 
 
-def _build_temp_chart(
-    comparison: pd.DataFrame, year_label: str, vintage_color: str, baseline_color: str
-) -> go.Figure:
-    """組出每月均溫折線圖，該年與 30 年平均固定用同一組配色角色。"""
-    months = comparison["month_label"]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=months, y=comparison["temp_mean_vintage"], name=year_label,
-        line=dict(color=vintage_color, width=2),
-    ))
-    fig.add_trace(go.Scatter(
-        x=months, y=comparison["temp_mean_baseline"], name="30 年平均",
-        line=dict(color=baseline_color, width=2),
-    ))
-    fig.update_layout(
-        title="每月均溫（該年 vs 30 年平均）", yaxis_title="°C",
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
+def _deviation_colors(values: pd.Series, theme_type: str) -> list[str]:
+    """依正負決定每根柱子的顏色：高於平均用橘、低於或等於平均用藍。"""
+    above, below = ABOVE_COLOR[theme_type], BELOW_COLOR[theme_type]
+    return [above if value > 0 else below for value in values]
 
 
-def _build_rain_chart(
-    comparison: pd.DataFrame, year_label: str, vintage_color: str, baseline_color: str
+def _build_deviation_table(comparison: pd.DataFrame) -> pd.DataFrame:
+    """把逐月距平整理成可直接閱讀的表格，作為圖表的等價替代讀法。"""
+    return pd.DataFrame({
+        "月份": comparison["month_label"],
+        "均溫距平（°C）": (
+            comparison["temp_mean_vintage"] - comparison["temp_mean_baseline"]
+        ).round(1),
+        "降雨距平（mm）": (
+            comparison["precipitation_mm_vintage"] - comparison["precipitation_mm_baseline"]
+        ).round(1),
+    })
+
+
+def _build_anomaly_chart(
+    comparison: pd.DataFrame, year_label: str, theme_type: str
 ) -> go.Figure:
-    """組出每月降雨量柱狀圖，跟均溫折線圖用同一組配色角色（該年／30 年平均語意一致）。"""
+    """組出逐月距平圖：上排溫度、下排降雨，兩排共用月份軸。
+
+    畫的是「該年減去 30 年平均」的差值而不是兩條並列的原始序列。使用者回饋原本的兩張圖
+    「有點多餘，取差異比較就好」（見 `04_Backlog.md` T-18 備註），差值圖把答案直接畫出來，
+    不用讀者自己在心裡相減。
+
+    溫度與降雨單位不同（°C 與 mm），因此拆成上下兩排各自有 y 軸，**不是**共用一張圖疊兩
+    個 y 軸——雙 y 軸會讓兩條序列的交叉點變成純粹的視覺巧合，是圖表設計的典型錯誤。
+
+    兩軸都設 `fixedrange=True` 關閉縮放。原本的另一個回饋是「放大後沒有明顯的方式縮回原本
+    的檢視範圍」（Plotly 預設的雙擊重置在觸控裝置上不直覺）。只有 7 根柱子的圖表本來就不
+    需要縮放，直接關掉比補一顆重置按鈕更乾淨——沒有縮放就沒有要重置的狀態。
+
+    Args:
+        comparison: `climate.build_monthly_comparison()` 的結果。
+        year_label: 圖例與 tooltip 用的年份標籤，例：「2019 年」。
+        theme_type: `"light"` 或 `"dark"`，決定配色。
+
+    Returns:
+        兩排子圖的 Plotly figure。
+    """
     months = comparison["month_label"]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=months, y=comparison["precipitation_mm_vintage"], name=year_label,
-        marker_color=vintage_color,
-    ))
-    fig.add_trace(go.Bar(
-        x=months, y=comparison["precipitation_mm_baseline"], name="30 年平均",
-        marker_color=baseline_color,
-    ))
-    fig.update_layout(
-        title="每月降雨量（該年 vs 30 年平均）", yaxis_title="mm", barmode="group",
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    temp_delta = comparison["temp_mean_vintage"] - comparison["temp_mean_baseline"]
+    rain_delta = (
+        comparison["precipitation_mm_vintage"] - comparison["precipitation_mm_baseline"]
     )
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
+        subplot_titles=("月均溫距平（°C）", "月降雨距平（mm）"),
+    )
+    for row, (delta, unit) in enumerate(((temp_delta, "°C"), (rain_delta, "mm")), start=1):
+        fig.add_trace(
+            go.Bar(
+                x=months, y=delta, showlegend=False,
+                marker_color=_deviation_colors(delta, theme_type),
+                hovertemplate=f"%{{x}}｜{year_label}比 30 年平均 %{{y:+.1f}} {unit}<extra></extra>",
+            ),
+            row=row, col=1,
+        )
+        fig.add_hline(
+            y=0, line_width=1, line_color=ZERO_LINE_COLOR[theme_type], row=row, col=1
+        )
+
+    fig.update_layout(
+        height=420, margin=dict(l=10, r=10, t=48, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        bargap=0.35,
+    )
+    # 關掉縮放與平移，圖表變成純閱讀用，不會進入使用者縮不回來的狀態。
+    fig.update_xaxes(fixedrange=True, showgrid=False)
+    fig.update_yaxes(fixedrange=True, zeroline=False, gridcolor="rgba(128,128,128,0.15)")
     return fig
 
 
 def render_charts(gathered: agent.GatheredData) -> None:
-    """畫每月均溫折線圖與降雨柱狀圖（T-15、US-4.2），山區產區加 ERA5 高估提醒。"""
+    """畫逐月氣候距平圖（T-15、US-4.2、T-23 改版），山區產區加 ERA5 高估提醒。"""
     if not gathered.region_canonical or not gathered.vintage_year:
         return
 
@@ -306,21 +346,24 @@ def render_charts(gathered: agent.GatheredData) -> None:
         st.info("這個產區與年份的氣候距平圖表資料暫時無法取得，不影響上面的風味推測報告。")
         return
 
-    st.subheader("氣候距平圖表")
+    st.subheader("逐月氣候距平")
     year_label = f"{gathered.vintage_year} 年"
 
     # st.context.theme.type 在沒有真實瀏覽器連線時（例如 AppTest、主題切換瞬間）可能是
     # None，此時退回亮色模式的配色，不能讓圖表因此掛掉。
     theme_type = st.context.theme.type or "light"
-    vintage_color = VINTAGE_COLOR[theme_type]
-    baseline_color = BASELINE_COLOR[theme_type]
 
     st.plotly_chart(
-        _build_temp_chart(comparison, year_label, vintage_color, baseline_color), width="stretch"
+        _build_anomaly_chart(comparison, year_label, theme_type), width="stretch"
     )
-    st.plotly_chart(
-        _build_rain_chart(comparison, year_label, vintage_color, baseline_color), width="stretch"
+    st.caption(
+        f"每根柱子是{year_label}該月減去 30 年平均的差值。"
+        "橘色代表高於平均、藍色代表低於平均，柱子越長差距越大。"
     )
+    # 圖表以外的第二種讀法：色彩與長度之外，數字本身也要拿得到（不讓 tooltip 成為唯一
+    # 入口，對讀不出顏色差異或用鍵盤操作的使用者尤其重要）。只有三欄，手機也不會爆版。
+    with st.expander("看數字"):
+        st.dataframe(_build_deviation_table(comparison), hide_index=True, width="stretch")
 
     if gathered.region_canonical in MOUNTAIN_RAINFALL_BIAS_REGIONS:
         st.caption(
