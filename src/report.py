@@ -102,6 +102,18 @@ REPORT_SYSTEM_PROMPT = """\
 提供的知識片段裡找不到支持，就不要在風味推測寫這個說法，改成在 `limitations` 裡誠實
 說明依據不足，`cited_ids` 也不要為了湊數而亂填。
 
+## 知識片段裡的數字不是這一年的實測值
+
+知識庫片段描述的是「通用規則」，裡面的數字（例如「生長季均溫比 30 年基準線高 0.5–2°C」
+「降雨量比基準線多 20–40%」）是那條規則適用情境的泛用範圍，**不是這一年的實際觀測值**。
+
+- 絕對不要把知識片段裡的溫度、降雨數字寫成這一年的氣候數據。
+- 只有「氣候距平資料」區塊裡的數字，才是這一年的實際觀測結果，也只有那些數字可以當成
+  本年度的氣候事實引用。
+- 「氣候距平資料」沒有提供絕對溫度差（例如 °C 差幾度），所以你**不能**在報告中寫出任何
+  「均溫比平均高／低幾度」這類的句子——那個數字不存在，寫出來就是編造（條款 15）。
+  要描述溫度就用該區塊給的「溫度方向」與 GDD 距平百分比。
+
 ## 信心層級
 
 每個知識片段都標了 confidence（high／medium／low），這是知識庫原本的信心評級，不要
@@ -175,6 +187,14 @@ def _build_climate_context(anomaly: dict[str, Any] | None) -> str:
     summary = anomaly.get("summary")
     if summary:
         lines.append(summary)
+
+    # 明確講出溫度方向，不要讓模型自己從百分比推。T-16 驗證中 2013 Bordeaux（GDD −3.6%）
+    # 就是被模型讀成「偏暖」，整份報告方向寫反。
+    direction_label = {"warmer": "偏暖", "cooler": "偏涼"}.get(
+        anomaly.get("temperature_direction") or "", "接近平均、方向不明顯"
+    )
+    lines.append(f"溫度方向：{direction_label}")
+
     lines.append(f"基準線區間：{anomaly['baseline_start_year']}–{anomaly['baseline_end_year']} 年")
 
     for metric_key, label in (
@@ -588,10 +608,12 @@ def main(argv: list[str] | None = None) -> int:
         season = climate.fetch_season_climate(args.region, args.year)
         baseline = climate.get_baseline(args.region)
         anomaly_obj = climate.compute_climate_anomaly(season, baseline)
-        anomaly = anomaly_obj.to_dict()
-        anomaly["summary"] = climate.format_anomaly_summary(anomaly_obj)
+        anomaly = climate.build_anomaly_payload(anomaly_obj)
         knowledge_hits = retrieval.query_climate_knowledge(
-            anomaly["summary"], n_results=args.n_results, region_canonical=region["region_canonical"]
+            anomaly["direction_query"],
+            n_results=args.n_results,
+            region_canonical=region["region_canonical"],
+            temperature_direction=anomaly["temperature_direction"],
         )
         markdown = generate_report(
             region_canonical=region["region_canonical"],

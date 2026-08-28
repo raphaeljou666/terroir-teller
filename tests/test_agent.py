@@ -81,6 +81,67 @@ def test_dispatch_tool_call參數不是合法JSON時改用空dict呼叫(monkeypa
     assert captured == {}
 
 
+# --- _inject_derived_arguments（T-16 後續修正） ----------------------------------------
+
+
+def test_已蒐集到距平時方向由程式注入而非沿用LLM給的文字(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM 把偏涼年份寫成「偏暖偏乾」時，程式算出來的方向要蓋過它。
+
+    這正是 T-16 驗證中 2013 Bordeaux 與 2011 Napa 失敗的形狀。
+    """
+    captured: dict[str, Any] = {}
+
+    def _spy(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"results": []}
+
+    monkeypatch.setitem(agent.tools.TOOL_DISPATCH, "query_climate_knowledge", _spy)
+    gathered = agent.GatheredData()
+    gathered.anomaly = {
+        "temperature_direction": "cooler",
+        "direction_query": "生長季偏涼、降雨偏多的年份，對葡萄成熟度與風味的影響",
+    }
+    tool_call = _make_tool_call(
+        "query_climate_knowledge", {"query_text": "偏暖偏乾", "n_results": 3}
+    )
+
+    agent._dispatch_tool_call(tool_call, gathered)
+
+    assert captured["temperature_direction"] == "cooler"
+    assert "偏涼" in captured["query_text"]
+    assert captured["n_results"] == 3  # 其他參數不受影響
+
+
+def test_尚未蒐集到距平時不注入方向也不拋錯(monkeypatch: pytest.MonkeyPatch) -> None:
+    """模型不照標準流程、先查知識庫時，退回原本行為而不是硬猜方向。"""
+    captured: dict[str, Any] = {}
+
+    def _spy(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"results": []}
+
+    monkeypatch.setitem(agent.tools.TOOL_DISPATCH, "query_climate_knowledge", _spy)
+    tool_call = _make_tool_call("query_climate_knowledge", {"query_text": "偏暖偏乾"})
+
+    agent._dispatch_tool_call(tool_call, agent.GatheredData())
+
+    assert "temperature_direction" not in captured
+    assert captured["query_text"] == "偏暖偏乾"
+
+
+def test_方向注入只作用在氣候知識檢索工具上() -> None:
+    """不要誤傷其他工具的參數。"""
+    arguments = {"region_name": "Bordeaux"}
+    gathered = agent.GatheredData()
+    gathered.anomaly = {"temperature_direction": "cooler", "direction_query": "x"}
+
+    agent._inject_derived_arguments("check_region_validity", arguments, gathered)
+
+    assert arguments == {"region_name": "Bordeaux"}
+
+
 # --- _update_gathered_data -------------------------------------------------------------
 
 

@@ -117,6 +117,9 @@ def _flatten_metadata_value(value: Any) -> str | int | float | bool:
     - dict 或元素不是純量的 list（如 `condition`、`sources`）：整個 `json.dumps()` 成
       字串，同樣只供顯示／除錯用。
 
+    注意 `condition` 是特例：它除了在這裡被 JSON 字串化之外，`build_chroma_metadata()`
+    另外會把它的子欄位攤平成 `condition_temperature` 等可過濾的純量，見該函式說明。
+
     Args:
         value: frontmatter 某個欄位的原始值。
 
@@ -134,6 +137,13 @@ def build_chroma_metadata(
     frontmatter: dict[str, Any], layer: str, source_path: Path
 ) -> dict[str, str | int | float | bool]:
     """把 frontmatter 轉成 Chroma metadata dict，補上合成欄位 `layer`。
+
+    `climate_rules/` 的巢狀 `condition` 區塊會額外攤平成 `condition_temperature`、
+    `condition_precipitation`、`condition_magnitude`、`condition_duration` 四個純量欄位。
+    沒有這一步，`condition` 只會是一個不透明的 JSON 字串，Chroma 的 `where` 看不進字串
+    內部，氣候方向就無法過濾——這正是 T-16 驗證中偏涼年份被檢索到偏暖規則的根因
+    （見 `docs/07_ValidationReport.md` 根因診斷）。原本的 JSON `condition` 欄位保留不動，
+    維持既有的顯示／除錯用途。
 
     Args:
         frontmatter: `parse_markdown_with_frontmatter()` 解析出的 dict。
@@ -153,6 +163,13 @@ def build_chroma_metadata(
         if value is None or key == "id":
             continue
         metadata[key] = _flatten_metadata_value(value)
+
+    condition = frontmatter.get("condition")
+    if isinstance(condition, dict):
+        for sub_key, sub_value in condition.items():
+            if sub_value is None:
+                continue
+            metadata[f"condition_{sub_key}"] = _flatten_metadata_value(sub_value)
     return metadata
 
 
@@ -337,7 +354,10 @@ def _query(query_text: str, n_results: int, where: dict[str, Any] | None) -> lis
 
 
 def query_climate_knowledge(
-    query_text: str, n_results: int = 5, region_canonical: str | None = None,
+    query_text: str,
+    n_results: int = 5,
+    region_canonical: str | None = None,
+    temperature_direction: str | None = None,
 ) -> list[dict[str, Any]]:
     """氣候推論主線的檢索：只找 `climate_rules` 層 + `regions` 層中 `topic=climate` 的片段。
 
@@ -346,11 +366,22 @@ def query_climate_knowledge(
     所以指定 `region_canonical` 時只會額外限制 `regions` 層那一支，`climate_rules` 層
     不受影響。
 
+    `temperature_direction` 是 T-16 後續修正加入的方向硬過濾。溫度方向是從 GDD 距平算出
+    來的既定事實，不該交給向量相似度去猜——相似度只負責在「方向正確的規則」之內排序。
+    刻意只篩溫度、不篩降雨：10 則規則在「溫度 × 降雨」網格上有缺口（沒有 warm_normal），
+    若連降雨一起硬篩，降雨接近平均的年份（如 2003 Bordeaux，生長季降雨距平 +0.0%）會只
+    剩 `rule_hail_10` 存活。降雨方向改由查詢字串當軟訊號傳達，見
+    `climate.format_direction_query()`。
+
     Args:
-        query_text: 查詢字串，例：「偏暖偏乾」。
+        query_text: 查詢字串，例：「生長季偏涼、降雨偏多的年份」。
         n_results: 回傳筆數上限。
         region_canonical: 指定時，`regions` 層片段額外限制在該產區；`climate_rules` 層
             不受此限制。
+        temperature_direction: `"warmer"`／`"cooler"`，由 `climate.classify_gdd_direction()`
+            算出。指定時 `climate_rules` 層只保留該方向與方向無關（`n/a`）的規則，後者
+            涵蓋 harvest_rain／drought／hail 這類本來就跟冷暖無關的規則。`None`（方向不明）
+            時完全不加這層過濾，退回純語意相似度。
 
     Returns:
         依相似度排序的檢索結果，每筆含 `id`、`document`、`metadata`、`distance`。
@@ -358,8 +389,30 @@ def query_climate_knowledge(
     climate_only = {"$and": [{"layer": "region"}, {"topic": "climate"}]}
     if region_canonical:
         climate_only["$and"].append({"region_canonical": region_canonical})
-    where: dict[str, Any] = {"$or": [{"layer": "climate_rule"}, climate_only]}
-    return _query(query_text, n_results, where)
+
+    rule_branch: dict[str, Any] = {"layer": "climate_rule"}
+    if temperature_direction:
+        rule_branch = {
+            "$and": [
+                {"layer": "climate_rule"},
+                {"condition_temperature": {"$in": [temperature_direction, "n/a"]}},
+            ]
+        }
+
+    where: dict[str, Any] = {"$or": [rule_branch, climate_only]}
+    hits = _query(query_text, n_results, where)
+
+    if temperature_direction and not any(
+        hit["metadata"].get("layer") == "climate_rule" for hit in hits
+    ):
+        # 最可能的原因是 metadata 還沒重新匯入（`condition_temperature` 欄位不存在），
+        # 這種情況下查詢不會報錯，只會靜默退化成「只剩產區片段」，很難從結果看出來。
+        logger.warning(
+            "方向過濾（%s）後沒有命中任何 climate_rule 片段，"
+            "請確認知識庫已用新版 metadata 重新匯入（python -m src.retrieval --ingest）",
+            temperature_direction,
+        )
+    return hits
 
 
 def query_all_knowledge(
@@ -399,6 +452,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="climate：只檢索氣候推論相關片段（預設）；all：不限 topic",
     )
     parser.add_argument("--region", help="限定產區（region_canonical），例：Bordeaux")
+    parser.add_argument(
+        "--temperature", choices=["warmer", "cooler"],
+        help="限定氣候規則的溫度方向（只在 --mode climate 有作用），用於驗證方向過濾",
+    )
     parser.add_argument("--n-results", type=int, default=5)
     parser.add_argument("--verbose", action="store_true", help="顯示 DEBUG 等級的開發者 log")
     return parser
@@ -425,8 +482,15 @@ def main(argv: list[str] | None = None) -> int:
             count = ingest_knowledge_base(sample_only=args.sample, reset=args.reset)
             print(f"匯入完成：{count} 筆")
         elif args.query:
-            query_fn = query_climate_knowledge if args.mode == "climate" else query_all_knowledge
-            hits = query_fn(args.query, n_results=args.n_results, region_canonical=args.region)
+            if args.mode == "climate":
+                hits = query_climate_knowledge(
+                    args.query, n_results=args.n_results, region_canonical=args.region,
+                    temperature_direction=args.temperature,
+                )
+            else:
+                hits = query_all_knowledge(
+                    args.query, n_results=args.n_results, region_canonical=args.region
+                )
             for rank, hit in enumerate(hits, start=1):
                 layer = hit["metadata"].get("layer")
                 topic = hit["metadata"].get("topic")

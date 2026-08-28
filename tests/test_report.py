@@ -136,6 +136,34 @@ def test_build_climate_context有資料時帶出具體距平數字() -> None:
     assert "+12.3%" in context
     assert "無法計算" in context
     assert "2019-10-02" in context
+    # 沒有 temperature_direction 欄位（舊格式）時不應拋錯，方向標成不明顯。
+    assert "溫度方向：" in context
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [("cooler", "偏涼"), ("warmer", "偏暖"), (None, "方向不明顯")],
+)
+def test_build_climate_context明確標出溫度方向(direction: str | None, expected: str) -> None:
+    """不要讓模型自己從百分比推冷暖——2013 Bordeaux 就是這樣被讀成偏暖的。"""
+    anomaly = {
+        "summary": "摘要",
+        "temperature_direction": direction,
+        "baseline_start_year": 1991,
+        "baseline_end_year": 2020,
+        "gdd": {"pct_anomaly": -3.6, "z_score": -0.5},
+        "season_precipitation": {"pct_anomaly": 9.3, "z_score": 0.4},
+        "pre_harvest_precipitation": {"pct_anomaly": 36.7, "z_score": 1.1},
+        "harvest_proxy_window_start": "2013-10-02",
+        "harvest_proxy_window_end": "2013-10-31",
+    }
+    assert expected in report._build_climate_context(anomaly)
+
+
+def test_report_prompt禁止把規則的通用數字當成實測值() -> None:
+    """2013 那句「高出0.5至2°C」逐字抄自 warm_wet.md 的情境條件，這條規則是直接對策。"""
+    assert "不是這一年的實測值" in report.REPORT_SYSTEM_PROMPT
+    assert "編造" in report.REPORT_SYSTEM_PROMPT
 
 
 # --- generate_report（LLM 呼叫用 monkeypatch 隔離） -----------------------------------------
