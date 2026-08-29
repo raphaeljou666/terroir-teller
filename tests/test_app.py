@@ -302,3 +302,11 @@ def test_亮暗兩種模式都取得到配色(theme_type: str) -> None:
     fig = app._build_anomaly_chart(_fake_comparison(), "2019 年", theme_type)
     used = set(fig.data[0].marker.color) | set(fig.data[1].marker.color)
     assert used <= {app.ABOVE_COLOR[theme_type], app.BELOW_COLOR[theme_type]}
+
+
+def test_距平表格提供圖表之外的第二種讀法() -> None:
+    """色彩與柱長之外，數字本身也要拿得到，不讓 tooltip 成為唯一入口。"""
+    table = app._build_deviation_table(_fake_comparison())
+    assert list(table.columns) == ["月份", "均溫距平（°C）", "降雨距平（mm）"]
+    assert list(table["均溫距平（°C）"]) == pytest.approx([-0.5, -1.5, 0.5])
+    assert list(table["降雨距平（mm）"]) == pytest.approx([10.0, -28.0, 19.0])
