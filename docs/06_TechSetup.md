@@ -48,7 +48,7 @@
 ```txt
 openai>=1.50.0
 chromadb>=0.5.0
-streamlit>=1.38.0
+streamlit>=1.44.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
 pandas>=2.2.0
@@ -70,6 +70,8 @@ pytest>=8.3.0
 - `pyyaml`：解析知識庫檔案的 YAML frontmatter
 - `pytest`：跑離線測試
 
+**`streamlit` 下限說明**：目前的 1.44.0 是 `[theme.light]`／`[theme.dark]` 雙模式主題（T-18 引入，見 `.streamlit/config.toml`）需要的版本，用二分法實測確認。曾經一度訂在 1.59.0，理由是當時同時用到 `st.camera_input(resolution=...)`——但 `st.camera_input()` 本身在 T-18 手機實測時發現打不開（需要 HTTPS 或 localhost 才能取得相機權限，區網 HTTP 環境會被瀏覽器擋掉），已整個移除，這個理由跟著失效，下限改回真正需要的 1.44.0。
+
 ---
 
 ## 4. 專案目錄結構
@@ -80,10 +82,14 @@ terroir-teller/
 ├── .env.example               # 環境變數範本（進 Git）
 ├── .gitignore
 ├── README.md
+├── CLAUDE.md
 ├── requirements.txt
 │
 ├── app.py                     # Streamlit 主頁面
-├── agent.py                   # Agent orchestrator
+├── agent.py                   # Agent orchestrator（階段一：tool routing）
+│
+├── .streamlit/
+│   └── config.toml            # 亮／暗雙模式主題設定
 │
 ├── src/
 │   ├── __init__.py
@@ -91,7 +97,7 @@ terroir-teller/
 │   ├── climate.py             # Open-Meteo API + GDD/距平計算
 │   ├── retrieval.py           # Chroma RAG 檢索
 │   ├── tools.py               # Function calling tools 定義
-│   └── report.py              # 風味推測報告生成 prompt
+│   └── report.py              # 風味推測報告生成（階段二：另一次 LLM 呼叫）
 │
 ├── data/
 │   ├── regions.json           # 產區座標對照表（由知識庫 frontmatter 生成）
@@ -109,16 +115,23 @@ terroir-teller/
 │   │       │   ├── 04_terroir.md
 │   │       │   └── 05_comparison.md
 │   │       └── ...            # 共 88 則
-│   └── cache/                 # 30 年基準線氣候快取
-│       └── bordeaux_baseline_1991_2020.json
+│   ├── cache/                 # 30 年基準線氣候快取（不進 Git，約 12MB）
+│   │   └── bordeaux_baseline_1991_2020.json
+│   ├── chroma/                # Chroma 向量資料庫 persist 目錄
+│   └── test_labels/           # 手動測試用的真實酒標照片（12 張）
 │
 ├── tests/
 │   ├── test_climate.py        # 氣候模組單元測試
-│   └── test_validation.py     # 知名年份驗證測試
+│   ├── test_retrieval.py      # 檢索層與知識庫 metadata 測試
+│   ├── test_vision.py         # 酒標辨識測試
+│   ├── test_tools.py          # function calling tools 測試
+│   ├── test_agent.py          # agent orchestrator 測試
+│   ├── test_report.py         # 報告生成測試
+│   └── test_app.py            # Streamlit UI 測試（AppTest，離線）
 │
-└── docs/                      # 這份文件包（可從本專案目錄搬進來）
-    ├── 00_README.md
+└── docs/                      # 這份文件包
     ├── 01_PRD.md
+    ├── 07_ValidationReport.md # 知名年份驗證報告
     └── ...
 ```
 

@@ -175,7 +175,28 @@
 | T-17 | 手動輸入 fallback 介面 | ✅ 完成 | 1h | T-14 | Vision 失敗時可切換手動 |
 | T-18 | 錯誤處理與 loading 狀態優化 | ✅ 完成 | 2h | T-14 | 各種例外都有友善訊息 |
 | T-19 | 一鍵匯出報告為 Markdown | ❌ 不做 | 1h | T-14 | 見下方決策說明 |
-| T-20 | README 撰寫（含 demo 截圖、方法論限制） | | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
+| T-20 | README 撰寫（含 demo 截圖、方法論限制） | ✅ 完成 | 2h | 全部 | 履歷投遞時可直接分享的 GitHub 頁面 |
+
+> **T-20 實作備註**
+>
+> - 新增「技術架構」「驗證結果」「方法論與限制」「刻意不做的事」四節，素材全部來自
+>   `docs/01_PRD.md`、`docs/07_ValidationReport.md`、`docs/04_Backlog.md` 既有紀錄，
+>   沒有重新編。驗證結果一節刻意把 T-16 當時「機率性問題修不掉」那個後來被證明錯誤的
+>   判斷寫進去，不是只留 T-21 修好後的 80%。
+> - 順手修掉四處文件漂移：`README.md` 過時的「Day 4+ 完成 app.py 後可用」字樣；
+>   `06_TechSetup.md` 的 `streamlit` 下限（原寫 1.38.0，`requirements.txt` 實際是
+>   1.59.0，但 1.59.0 的理由——`camera_input(resolution=...)`——已隨 T-18 移除
+>   `camera_input()` 失效，重新確認 `[theme.light]`／`[theme.dark]` 才是真正下限，
+>   訂為 1.44.0，`requirements.txt` 同步更新）；`06_TechSetup.md` §4 目錄結構（移除
+>   不存在的 `tests/test_validation.py`／`docs/00_README.md`，補上 `.streamlit/`、
+>   `data/test_labels/`、`data/chroma/`，測試檔案清單改成實際的 7 個檔案）；
+>   `CLAUDE.md` 條款 26 補上「已覆寫規範 #26」標註，比照條款 27 的作法。
+> - **Demo 截圖留 TODO 佔位，沒有真的截**。環境裡沒有 playwright／selenium 或任何
+>   瀏覽器自動化工具，也沒有已安裝的 headless 瀏覽器，無法在不新增依賴的情況下自己
+>   開瀏覽器跑一輪拍照→辨識→報告的完整流程截圖（且完整流程會實際呼叫 OpenAI API
+>   產生費用，條款 19 的精神是先確認有必要再花）。README「畫面截圖」一節保留三個
+>   `<!-- TODO -->` 註解與預期檔名（`docs/images/demo-0{1,2,3}-*.png`），待使用者
+>   或後續一輪手動補上。
 
 > **T-16 實作備註**
 >
