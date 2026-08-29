@@ -265,19 +265,6 @@ def _deviation_colors(values: pd.Series, theme_type: str) -> list[str]:
     return [above if value > 0 else below for value in values]
 
 
-def _build_deviation_table(comparison: pd.DataFrame) -> pd.DataFrame:
-    """把逐月距平整理成可直接閱讀的表格，作為圖表的等價替代讀法。"""
-    return pd.DataFrame({
-        "月份": comparison["month_label"],
-        "均溫距平（°C）": (
-            comparison["temp_mean_vintage"] - comparison["temp_mean_baseline"]
-        ).round(1),
-        "降雨距平（mm）": (
-            comparison["precipitation_mm_vintage"] - comparison["precipitation_mm_baseline"]
-        ).round(1),
-    })
-
-
 def _build_anomaly_chart(
     comparison: pd.DataFrame, year_label: str, theme_type: str
 ) -> go.Figure:
@@ -360,11 +347,6 @@ def render_charts(gathered: agent.GatheredData) -> None:
         f"每根柱子是{year_label}該月減去 30 年平均的差值。"
         "橘色代表高於平均、藍色代表低於平均，柱子越長差距越大。"
     )
-    # 圖表以外的第二種讀法：色彩與長度之外，數字本身也要拿得到（不讓 tooltip 成為唯一
-    # 入口，對讀不出顏色差異或用鍵盤操作的使用者尤其重要）。只有三欄，手機也不會爆版。
-    with st.expander("看數字"):
-        st.dataframe(_build_deviation_table(comparison), hide_index=True, width="stretch")
-
     if gathered.region_canonical in MOUNTAIN_RAINFALL_BIAS_REGIONS:
         st.caption(
             f"{gathered.region_canonical} 地形起伏較大，ERA5 氣候資料在山區容易高估降雨量"
