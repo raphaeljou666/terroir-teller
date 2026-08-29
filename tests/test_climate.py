@@ -383,6 +383,72 @@ def test_GDD_只計入超過基礎溫度的部分且缺值不計入() -> None:
     assert metrics["gdd_missing_days"] == 1
 
 
+def test_生長季均溫排除缺值天且與GDD共用同一組有效日() -> None:
+    frame = _daily_frame(
+        ["2019-04-01", "2019-04-02", "2019-04-03", "2019-04-04"],
+        [5.0, 15.0, None, 25.0],
+        [0.0, 0.0, 0.0, 0.0],
+    )
+    metrics = climate._season_climate_metrics(frame, harvest_window_days=4)
+    # 缺值那天不列入分母：(5 + 15 + 25) / 3 = 15.0，不是 45 / 4。
+    assert metrics["temp_mean_c"] == pytest.approx(15.0)
+    assert metrics["temp_mean_missing_days"] == metrics["gdd_missing_days"] == 1
+
+
+def test_整季氣溫全部缺值時誠實失敗而不是回報極冷的一年() -> None:
+    """GDD 加總會得到 0.0、均溫會得到 NaN，兩個都會被讀成「極冷」而不是「沒資料」。"""
+    frame = _daily_frame(
+        ["2019-04-01", "2019-04-02"], [None, None], [10.0, 10.0]
+    )
+    with pytest.raises(climate.ClimateDataError) as excinfo:
+        climate._season_climate_metrics(frame, harvest_window_days=2)
+    assert "缺漏" in excinfo.value.user_message
+    assert excinfo.value.technical_detail
+
+
+def test_距平結果含生長季均溫且絕對差算得出來() -> None:
+    # 目標年兩天都 20°C；基準線兩年分別是 10°C 與 14°C，平均 12°C。
+    season = _make_anomaly_season(
+        2019, ["2019-04-01", "2019-04-02"], [20.0, 20.0], [0.0, 0.0]
+    )
+    baseline = _make_anomaly_baseline([
+        _make_anomaly_season(1991, ["1991-04-01", "1991-04-02"], [10.0, 10.0], [0.0, 0.0]),
+        _make_anomaly_season(1992, ["1992-04-01", "1992-04-02"], [14.0, 14.0], [0.0, 0.0]),
+    ])
+
+    anomaly = climate.compute_climate_anomaly(season, baseline)
+
+    assert anomaly.season_mean_temp.vintage_value == pytest.approx(20.0)
+    assert anomaly.season_mean_temp.baseline_mean == pytest.approx(12.0)
+    # 呈現端要用的絕對差：+8.0°C。百分比雖然算得出來，但攝氏沒有絕對零點，不拿來顯示。
+    diff = anomaly.season_mean_temp.vintage_value - anomaly.season_mean_temp.baseline_mean
+    assert diff == pytest.approx(8.0)
+
+
+def test_摘要不含絕對溫度以免報告LLM抄到攝氏數字() -> None:
+    """T-16／T-22 修掉的缺陷是模型編造「均溫比平均高 X°C」，修法是 prompt 裡沒有度數可抄。
+
+    這段摘要會經由 `build_anomaly_payload()` 進到報告生成 LLM 的 prompt。T-24 之後絕對
+    均溫算得出來了，但只能走 UI 的比對表，不能回流到這裡。
+    """
+    season = _make_anomaly_season(
+        2019, ["2019-04-01", "2019-04-02"], [20.0, 20.0], [5.0, 5.0]
+    )
+    baseline = _make_anomaly_baseline([
+        _make_anomaly_season(1991, ["1991-04-01", "1991-04-02"], [10.0, 10.0], [5.0, 5.0]),
+        _make_anomaly_season(1992, ["1992-04-01", "1992-04-02"], [14.0, 14.0], [7.0, 7.0]),
+    ])
+    anomaly = climate.compute_climate_anomaly(season, baseline)
+
+    summary = climate.format_anomaly_summary(anomaly)
+    assert "°C" not in summary
+    assert "度" not in summary
+
+    # 但 payload 本身要帶著均溫，UI 的比對表靠它。
+    payload = climate.build_anomaly_payload(anomaly)
+    assert payload["season_mean_temp"]["vintage_value"] == pytest.approx(20.0)
+
+
 def test_逐年算_GDD_再平均_跟_先平均氣溫再算_GDD_結果不同() -> None:
     # 年份 A：兩天都是 12°C，逐日 GDD 為 2、2，年總和 4。
     # 年份 B：兩天都是 6°C，逐日 GDD 為 0、0，年總和 0。
@@ -522,6 +588,7 @@ def test_人類可讀摘要符合目標句型且標註採收日為代理值() ->
     anomaly = climate.ClimateAnomaly(
         region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
         baseline_start_year=1991, baseline_end_year=2020,
+        season_mean_temp=_metric(6.6),
         gdd=_metric(12.0), season_precipitation=_metric(-20.0),
         pre_harvest_precipitation=_metric(-56.0, missing=2, missing_years=(1995,)),
         harvest_proxy_window_start="2019-10-02", harvest_proxy_window_end="2019-10-31",
@@ -565,6 +632,7 @@ def _make_direction_anomaly(
     return climate.ClimateAnomaly(
         region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
         baseline_start_year=1991, baseline_end_year=2020,
+        season_mean_temp=_metric(0.0),
         gdd=_metric(gdd_pct), season_precipitation=_metric(precip_pct),
         pre_harvest_precipitation=_metric(0.0),
         harvest_proxy_window_start="2019-10-02", harvest_proxy_window_end="2019-10-31",
