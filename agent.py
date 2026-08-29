@@ -103,14 +103,17 @@ class AnalysisResult:
     Attributes:
         status: 分析結果狀態。`"max_iterations"` 不是獨立狀態——迴圈輪數用盡時仍會嘗試
             用已蒐集的（不完整）資料生成報告，成功就是 `"ok"`，跟正常流程一樣。
-        markdown: 成功時的報告全文，非成功時為 `None`。
+        sections: 成功時的報告四個段落（`report.ReportSections`），非成功時為 `None`。
+            刻意不存已拼好的 Markdown 字串：Streamlit 端要把不同段落擺進不同的收合區塊，
+            拿到整份 Markdown 再切回來只會多一層字串比對的脆弱性（T-24）。CLI 需要整份
+            全文時呼叫 `sections.to_markdown()`。
         user_message: 非成功時給使用者看的白話說明，成功時為 `None`。
         gathered: 迴圈蒐集到的資料，圖表與辨識結果 UI 都要用到；`AgentError` 發生在
             拿到 client 之前，沒有蒐集到任何資料，此時為預設空的 `GatheredData()`。
     """
 
     status: AnalysisStatus
-    markdown: str | None = None
+    sections: report.ReportSections | None = None
     user_message: str | None = None
     gathered: GatheredData = field(default_factory=GatheredData)
 
@@ -422,7 +425,7 @@ def analyze(
         on_progress: 選填的進度回呼，見 `run_agent_loop()`；CLI 路徑不傳，行為不變。
 
     Returns:
-        `AnalysisResult`，`status="ok"` 時 `markdown` 有值，其餘狀態 `user_message` 有值。
+        `AnalysisResult`，`status="ok"` 時 `sections` 有值，其餘狀態 `user_message` 有值。
     """
     task_message = _build_task_message(image_path=image_path, region=region, year=year)
     try:
@@ -440,7 +443,7 @@ def analyze(
         on_progress("正在生成報告……")
 
     try:
-        markdown = report.generate_report(
+        sections = report.generate_report(
             region_canonical=gathered.region_canonical,
             region_zh=gathered.region_zh,
             vintage_year=gathered.vintage_year,
@@ -452,7 +455,7 @@ def analyze(
         logger.error("技術細節：%s", exc.technical_detail)
         return AnalysisResult(status="error", user_message=exc.user_message, gathered=gathered)
 
-    return AnalysisResult(status="ok", markdown=markdown, gathered=gathered)
+    return AnalysisResult(status="ok", sections=sections, gathered=gathered)
 
 
 # --- CLI ------------------------------------------------------------------------
@@ -509,8 +512,8 @@ def main(argv: list[str] | None = None) -> int:
         max_iterations=args.max_iterations,
     )
 
-    if result.status == "ok":
-        print(result.markdown)
+    if result.status == "ok" and result.sections is not None:
+        print(result.sections.to_markdown())
         return 0
 
     print(f"\n{result.user_message}")

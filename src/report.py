@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import openai
@@ -48,6 +49,38 @@ USER_MESSAGE_GENERATION_FAILED = "報告生成暫時無法使用，請稍後再�
 
 
 # --- 例外 -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReportSections:
+    """報告的四個段落，各自獨立，不預先拼成一整份 Markdown。
+
+    早期版本只回傳一整串 Markdown，`app.py` 想單獨取出某一段就得 `partition("## 資料來源")`
+    去對標題文字——多切一段就要多一次 partition，而且一旦標題改字就靜默失效。改回傳結構化
+    欄位之後，呈現端要怎麼分區、哪一段收合、哪一段放最上面，都只是取欄位的事（T-24）。
+
+    CLI 仍然需要一整份 Markdown，由 `to_markdown()` 負責組裝，格式與改版前一致。
+
+    Attributes:
+        flavor: 風味推測內文，段落間以空行分隔，句尾已附上 `[chunk_id]` 引用標記。
+        climate_summary: 支撐風味推測的氣候證據摘要。
+        limitations: 限制說明，已經過 `_ensure_limitation_caveats()` 的必寫提醒補漏。
+        sources: 資料來源清單，由程式決定式組裝，不經 LLM。
+    """
+
+    flavor: str
+    climate_summary: str
+    limitations: str
+    sources: str
+
+    def to_markdown(self) -> str:
+        """組成四段式的 Markdown 全文，供 CLI 輸出使用。"""
+        return (
+            f"## 風味推測\n\n{self.flavor}\n\n"
+            f"## 氣候摘要\n\n{self.climate_summary}\n\n"
+            f"## 限制說明\n\n{self.limitations}\n\n"
+            f"## 資料來源\n\n{self.sources}\n"
+        )
 
 
 class ReportGenerationError(Exception):
@@ -581,8 +614,8 @@ def generate_report(
     anomaly: dict[str, Any] | None,
     knowledge_hits: list[dict[str, Any]],
     label_info: dict[str, Any] | None = None,
-) -> str:
-    """生成風味推測報告的 Markdown 全文（T-13、US-3.3）。
+) -> ReportSections:
+    """生成風味推測報告的四個段落（T-13、US-3.3）。
 
     Args:
         region_canonical: 產區正式英文名稱。
@@ -593,7 +626,8 @@ def generate_report(
         label_info: 酒標辨識結果（酒莊、品種等），非圖片流程時為 `None`。
 
     Returns:
-        含「風味推測」「氣候摘要」「限制說明」「資料來源」四段的 Markdown 全文。
+        `ReportSections`，含「風味推測」「氣候摘要」「限制說明」「資料來源」四段。
+        需要單一字串（例如 CLI 輸出）時呼叫它的 `to_markdown()`。
 
     Raises:
         ReportGenerationError: API Key 未設定或 LLM 呼叫失敗。
@@ -612,11 +646,11 @@ def generate_report(
     sources_section = _build_sources_section(cited_ids, hit_lookup, anomaly)
     flavor_section = _render_flavor_section(structured["flavor_inference"])
 
-    return (
-        f"## 風味推測\n\n{flavor_section}\n\n"
-        f"## 氣候摘要\n\n{structured['climate_summary'].strip()}\n\n"
-        f"## 限制說明\n\n{limitations.strip()}\n\n"
-        f"## 資料來源\n\n{sources_section}\n"
+    return ReportSections(
+        flavor=flavor_section,
+        climate_summary=structured["climate_summary"].strip(),
+        limitations=limitations.strip(),
+        sources=sources_section,
     )
 
 
@@ -664,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
             region_canonical=region["region_canonical"],
             temperature_direction=anomaly["temperature_direction"],
         )
-        markdown = generate_report(
+        sections = generate_report(
             region_canonical=region["region_canonical"],
             region_zh=region["region_zh"],
             vintage_year=args.year,
@@ -677,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{exc.user_message}")
         return 1
 
-    print(markdown)
+    print(sections.to_markdown())
     return 0
 
 
