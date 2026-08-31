@@ -34,6 +34,13 @@ def _make_tool_call(name: str, arguments: dict[str, Any], call_id: str = "call_1
     return _FakeToolCall(id=call_id, function=_FakeFunction(name=name, arguments=json.dumps(arguments)))
 
 
+def _fake_sections(flavor: str) -> agent.report.ReportSections:
+    """組出替換 `report.generate_report()` 回傳值用的假報告段落。"""
+    return agent.report.ReportSections(
+        flavor=flavor, climate_summary="氣候摘要", limitations="限制說明", sources="- 來源"
+    )
+
+
 def _stub_run_agent_loop(gathered: agent.GatheredData, state: str) -> Any:
     """組出替換 `agent.run_agent_loop` 用的假函式，簽章比照新增的 `on_progress` 參數。"""
     def _stub(client: Any, task: str, max_iterations: int, on_progress: Any = None) -> Any:
@@ -334,12 +341,15 @@ def test_analyze成功時回傳ok狀態與報告全文(monkeypatch: pytest.Monke
     )
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(agent, "run_agent_loop", _stub_run_agent_loop(gathered, "ok"))
-    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
+    monkeypatch.setattr(
+        agent.report, "generate_report", lambda **kwargs: _fake_sections("報告全文")
+    )
 
     result = agent.analyze(region="Bordeaux", year=2019)
 
     assert result.status == "ok"
-    assert result.markdown == "# 報告全文"
+    assert result.sections is not None
+    assert result.sections.flavor == "報告全文"
     assert result.gathered is gathered
 
 
@@ -359,7 +369,9 @@ def test_analyze會把on_progress傳給run_agent_loop並在生成報告前額外
 
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(agent, "run_agent_loop", _fake_run_agent_loop)
-    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
+    monkeypatch.setattr(
+        agent.report, "generate_report", lambda **kwargs: _fake_sections("報告全文")
+    )
 
     progress_messages: list[str] = []
     agent.analyze(region="Bordeaux", year=2019, on_progress=progress_messages.append)
@@ -374,7 +386,9 @@ def test_analyze不傳on_progress時cli路徑行為不變(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(agent, "run_agent_loop", _stub_run_agent_loop(gathered, "ok"))
-    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 報告全文")
+    monkeypatch.setattr(
+        agent.report, "generate_report", lambda **kwargs: _fake_sections("報告全文")
+    )
 
     result = agent.analyze(region="Bordeaux", year=2019)
 
@@ -412,12 +426,15 @@ def test_analyze達到max_iterations上限仍視同ok嘗試生成報告(monkeypa
     gathered = agent.GatheredData(region_canonical="Bordeaux", region_zh="波爾多")
     monkeypatch.setattr(agent, "_get_client", lambda: object())
     monkeypatch.setattr(agent, "run_agent_loop", _stub_run_agent_loop(gathered, "max_iterations"))
-    monkeypatch.setattr(agent.report, "generate_report", lambda **kwargs: "# 部分資料報告")
+    monkeypatch.setattr(
+        agent.report, "generate_report", lambda **kwargs: _fake_sections("部分資料報告")
+    )
 
     result = agent.analyze(region="Bordeaux", year=2019)
 
     assert result.status == "ok"
-    assert result.markdown == "# 部分資料報告"
+    assert result.sections is not None
+    assert result.sections.flavor == "部分資料報告"
 
 
 def test_analyze沒有api_key時回傳error狀態與空的gathered(monkeypatch: pytest.MonkeyPatch) -> None:

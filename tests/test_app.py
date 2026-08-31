@@ -16,9 +16,20 @@ from streamlit.testing.v1 import AppTest
 
 import agent
 import app
-from src import climate, vision
+from src import climate, report, vision
 
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
+
+
+def _fake_sections(**overrides: Any) -> report.ReportSections:
+    """組出一份假的報告四段，四段內容刻意各不相同，方便斷言擺對了位置。"""
+    return report.ReportSections(**{
+        "flavor": "風味推測測試內容",
+        "climate_summary": "氣候摘要測試內容",
+        "limitations": "限制說明測試內容",
+        "sources": "- rule_test_01｜測試來源",
+        **overrides,
+    })
 
 
 def _fake_ok_result(**overrides: Any) -> agent.AnalysisResult:
@@ -26,7 +37,7 @@ def _fake_ok_result(**overrides: Any) -> agent.AnalysisResult:
     gathered = agent.GatheredData(region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019)
     return agent.AnalysisResult(
         status="ok",
-        markdown="## 風味推測\n測試內容\n## 資料來源\n[1] 測試來源",
+        sections=_fake_sections(),
         gathered=gathered,
         **overrides,
     )
@@ -178,7 +189,7 @@ def test_氣候資料取不到時圖表區顯示白話說明而非靜默消失(m
         "analyze",
         lambda **kw: agent.AnalysisResult(
             status="ok",
-            markdown="## 風味推測\n測試內容\n## 資料來源\n[1] 測試來源",
+            sections=_fake_sections(),
             gathered=agent.GatheredData(
                 region_canonical="測試專用不存在產區", region_zh="測試", vintage_year=2019
             ),
@@ -194,20 +205,59 @@ def test_氣候資料取不到時圖表區顯示白話說明而非靜默消失(m
     assert "暫時無法取得" in "".join(i.value for i in at.info)
 
 
-# --- 距平卡片：pct_anomaly 為 None 時不拋例外（T-18） -------------------------------------
+# --- 氣候比對表（T-24） -----------------------------------------------------------------
 
 
-def test_距平百分比為None時距平卡片不拋例外且不顯示delta(monkeypatch: Any) -> None:
+def _full_anomaly() -> dict[str, Any]:
+    """一份三個指標都齊全的距平 payload，數字挑成手算得出來的值。"""
+    return {
+        "season_mean_temp": {
+            "vintage_value": 19.4, "baseline_mean": 18.2, "pct_anomaly": 6.59,
+        },
+        "gdd": {"vintage_value": 1580.0, "baseline_mean": 1410.0, "pct_anomaly": 12.06},
+        "season_precipitation": {
+            "vintage_value": 480.0, "baseline_mean": 610.0, "pct_anomaly": -21.31,
+        },
+    }
+
+
+def test_比對表三列依序是均溫_GDD_降雨() -> None:
+    """均溫排第一列：三個指標裡只有它有生活經驗錨點，讀者第一眼才站得穩。"""
+    table = app._build_comparison_table(_full_anomaly(), 2019)
+    assert list(table["指標"]) == ["生長季均溫", "熱量累積（GDD）", "生長季降雨"]
+
+
+def test_比對表把採收年與30年平均並列() -> None:
+    table = app._build_comparison_table(_full_anomaly(), 2019)
+    assert list(table.columns) == ["指標", "2019 年", "30 年平均", "差異"]
+    assert list(table["2019 年"]) == ["19.4°C", "1,580", "480 mm"]
+    assert list(table["30 年平均"]) == ["18.2°C", "1,410", "610 mm"]
+
+
+def test_溫度差異用絕對值而不是百分比() -> None:
+    """攝氏是等距尺度沒有絕對零點，「均溫比平均高 6%」在氣候學上不成立。"""
+    table = app._build_comparison_table(_full_anomaly(), 2019)
+    差異 = list(table["差異"])
+    assert 差異[0] == "+1.2°C", "均溫要用絕對差"
+    assert "%" not in 差異[0]
+    assert 差異[1] == "+12.1%", "GDD 有絕對零點，用百分比距平"
+    assert 差異[2] == "-21.3%"
+
+
+def test_距平百分比為None時比對表顯示無法計算而不是捏造0(monkeypatch: Any) -> None:
+    """`pct_anomaly` 在基準線標準差為 0 時會是 `None`，不能填一個假的數字（條款 15）。"""
     anomaly = {
-        "gdd": {"vintage_value": 1500.0, "pct_anomaly": None},
-        "season_precipitation": {"vintage_value": 600.0, "pct_anomaly": None},
+        "gdd": {"vintage_value": 1500.0, "baseline_mean": 1500.0, "pct_anomaly": None},
+        "season_precipitation": {
+            "vintage_value": 600.0, "baseline_mean": 600.0, "pct_anomaly": None,
+        },
     }
     monkeypatch.setattr(
         agent,
         "analyze",
         lambda **kw: agent.AnalysisResult(
             status="ok",
-            markdown="## 風味推測\n測試內容\n## 資料來源\n[1] 測試來源",
+            sections=_fake_sections(),
             gathered=agent.GatheredData(
                 region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019, anomaly=anomaly
             ),
@@ -220,8 +270,47 @@ def test_距平百分比為None時距平卡片不拋例外且不顯示delta(monk
     at.button[0].click().run()
 
     assert not at.exception
-    assert len(at.metric) == 2
-    assert all(m.delta == "" for m in at.metric)
+
+    # 均溫整列缺席（舊格式的 payload），GDD 與降雨算不出百分比。
+    table = app._build_comparison_table(anomaly, 2019)
+    assert list(table["差異"]) == [app.UNCOMPUTABLE_DELTA] * 3
+    assert list(table["2019 年"])[0] == app.UNAVAILABLE_CELL
+
+
+def test_年份未知時比對表欄名退回採收年() -> None:
+    table = app._build_comparison_table(_full_anomaly(), None)
+    assert "採收年" in table.columns
+
+
+# --- 報告分區：結論不收合、依據與說明收合（T-24） -------------------------------------------
+
+
+def test_風味推測直接顯示而依據與說明收在兩個區塊裡(monkeypatch: Any) -> None:
+    """使用者走完整段流程要的就是結論，不該讓他多點一下才看得到。"""
+    monkeypatch.setattr(
+        agent,
+        "analyze",
+        lambda **kw: agent.AnalysisResult(
+            status="ok",
+            sections=_fake_sections(),
+            gathered=agent.GatheredData(
+                region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
+                anomaly=_full_anomaly(),
+            ),
+        ),
+    )
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _fill_minimum_form(at)
+    at.button[0].click().run()
+
+    assert not at.exception
+    body = "".join(m.value for m in at.markdown)
+    assert "風味推測測試內容" in body
+    assert "氣候摘要測試內容" in body, "氣候摘要要當總結放在影響原因區塊"
+    assert "限制說明測試內容" in body
+    assert "rule_test_01" in body
 
 
 # --- 成本控管回歸測試（條款 19，最重要） -----------------------------------------------

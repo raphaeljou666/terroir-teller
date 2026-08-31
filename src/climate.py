@@ -844,6 +844,7 @@ class ClimateAnomaly:
     vintage_year: int
     baseline_start_year: int
     baseline_end_year: int
+    season_mean_temp: MetricAnomaly
     gdd: MetricAnomaly
     season_precipitation: MetricAnomaly
     pre_harvest_precipitation: MetricAnomaly
@@ -870,12 +871,13 @@ def _season_climate_metrics(
         harvest_window_days: 採收前降雨代理指標回推的天數（含當天），預設 30 天。
 
     Returns:
-        dict，含 `gdd`、`gdd_missing_days`、`season_precip_mm`、
-        `season_precip_missing_days`、`pre_harvest_precip_mm`、`pre_harvest_missing_days`、
-        `pre_harvest_window_start`、`pre_harvest_window_end`（後兩者為 `YYYY-MM-DD` 字串）。
+        dict，含 `temp_mean_c`、`temp_mean_missing_days`、`gdd`、`gdd_missing_days`、
+        `season_precip_mm`、`season_precip_missing_days`、`pre_harvest_precip_mm`、
+        `pre_harvest_missing_days`、`pre_harvest_window_start`、`pre_harvest_window_end`
+        （後兩者為 `YYYY-MM-DD` 字串）。
 
     Raises:
-        ClimateDataError: `frame` 為空，沒有任何一天的資料可算。
+        ClimateDataError: `frame` 為空，或整季的 `temp_mean` 全部缺值。
     """
     if frame.empty:
         raise ClimateDataError(
@@ -884,6 +886,19 @@ def _season_climate_metrics(
         )
 
     temp_valid = frame["temp_mean"].notna()
+    if not temp_valid.any():
+        # 一天有效氣溫都沒有時，GDD 加總會得到 0.0、均溫會得到 NaN，兩者都會被讀成
+        # 「這一年極度寒冷」而不是「沒有資料」。與其輸出誤導性的數字，不如誠實失敗
+        # （條款 15）。ERA5 是完整的重分析資料集，實務上不會走到這裡。
+        raise ClimateDataError(
+            "這個年份的氣溫資料完全缺漏，無法計算均溫與積溫。",
+            f"_season_climate_metrics() 收到 {len(frame)} 天資料，temp_mean 全部為缺值",
+        )
+
+    # 生長季均溫與 GDD 共用同一組有效日：兩者都是從 temp_mean 算出來的，缺值天數必然相同。
+    # 均溫是給使用者看的「有生活經驗錨點」的數字，GDD 則是餵給方向分類與知識檢索的指標，
+    # 用途不同但資料來源是同一欄。
+    temp_mean_c = float(frame.loc[temp_valid, "temp_mean"].mean())
     gdd = float(frame.loc[temp_valid, "temp_mean"].sub(GDD_BASE_TEMP_C).clip(lower=0.0).sum())
     gdd_missing_days = int((~temp_valid).sum())
 
@@ -899,6 +914,8 @@ def _season_climate_metrics(
     pre_harvest_missing_days = int((~window_valid).sum())
 
     return {
+        "temp_mean_c": temp_mean_c,
+        "temp_mean_missing_days": gdd_missing_days,
         "gdd": gdd,
         "gdd_missing_days": gdd_missing_days,
         "season_precip_mm": season_precip_mm,
@@ -1038,6 +1055,13 @@ def compute_climate_anomaly(season: SeasonClimate, baseline: ClimateBaseline) ->
     vintage_metrics = _season_climate_metrics(season.to_dataframe())
     per_year_metrics = _baseline_year_metrics(baseline)
 
+    # 均溫的 `pct_anomaly` 算得出來但沒有意義：攝氏是等距尺度不是比例尺度，「均溫比平均
+    # 高 6%」在氣候學上不成立。呈現端一律用 `vintage_value - baseline_mean` 的絕對差
+    # （+1.2°C），百分比只給 GDD 與降雨這種有絕對零點的量使用。z-score 則兩者都適用。
+    season_mean_temp = _build_metric_anomaly(
+        "season_mean_temp_c", "temp_mean_c", "temp_mean_missing_days",
+        vintage_metrics, per_year_metrics,
+    )
     gdd = _build_metric_anomaly(
         "gdd", "gdd", "gdd_missing_days", vintage_metrics, per_year_metrics
     )
@@ -1056,6 +1080,7 @@ def compute_climate_anomaly(season: SeasonClimate, baseline: ClimateBaseline) ->
         vintage_year=season.vintage_year,
         baseline_start_year=baseline.start_year,
         baseline_end_year=baseline.end_year,
+        season_mean_temp=season_mean_temp,
         gdd=gdd,
         season_precipitation=season_precip,
         pre_harvest_precipitation=pre_harvest,
@@ -1073,7 +1098,15 @@ def _describe_pct_anomaly(metric: MetricAnomaly, label: str) -> str:
 
 
 def format_anomaly_summary(anomaly: ClimateAnomaly) -> str:
-    """把距平結果整理成人類可讀摘要，供 CLI 與後續報告生成參考。"""
+    """把距平結果整理成人類可讀摘要，供 CLI 與後續報告生成參考。
+
+    **刻意不寫入 `season_mean_temp` 的絕對溫度**。這段字串會經由 `build_anomaly_payload()`
+    的 `summary` 欄位進到 `report._build_climate_context()`，也就是報告生成 LLM 的 prompt
+    裡。T-16／T-22 驗證過的一個缺陷正是模型會編造「均溫比平均高 X°C」，修法是讓 prompt 裡
+    根本沒有攝氏數字可抄（見 `report.REPORT_SYSTEM_PROMPT`）。T-24 之後絕對均溫確實算得
+    出來，但它只走 UI 的比對表，由程式決定式渲染，不回流到這裡——把它加進來等於把那個
+    缺陷放回去。
+    """
     headline = (
         f"{anomaly.region_canonical}（{anomaly.region_zh}）{anomaly.vintage_year} "
         f"{_describe_pct_anomaly(anomaly.gdd, 'GDD')}、"
@@ -1174,6 +1207,8 @@ def build_anomaly_payload(anomaly: ClimateAnomaly) -> dict[str, Any]:
     Returns:
         距平 dict，額外含 `summary`、`temperature_direction`、`direction_query` 三個欄位。
         `temperature_direction` 為 `None` 時表示方向不明，下游不應施加方向過濾。
+        `season_mean_temp` 的絕對均溫只給 UI 的氣候比對表用，報告生成 LLM 看不到它——
+        理由見 `format_anomaly_summary()` 的 docstring。
     """
     payload = anomaly.to_dict()
     payload["summary"] = format_anomaly_summary(anomaly)

@@ -121,6 +121,32 @@ def test_build_climate_context沒有資料時誠實說明不編造數字() -> No
     assert "編造" in context
 
 
+def test_build_climate_context不把絕對均溫帶進prompt() -> None:
+    """T-24 起 payload 帶著 `season_mean_temp`，但它只給 UI 的比對表用。
+
+    報告 system prompt 明文禁止寫出「均溫比平均高幾度」（T-22 修掉的編造缺陷），前提是
+    prompt 裡根本沒有攝氏數字可抄。距平 payload 多一個欄位不該悄悄破壞這個前提。
+    """
+    anomaly = {
+        "summary": "Bordeaux（波爾多）2019 GDD 比 30 年平均高 12%。",
+        "baseline_start_year": 1991,
+        "baseline_end_year": 2020,
+        "season_mean_temp": {
+            "vintage_value": 19.4, "baseline_mean": 18.2, "pct_anomaly": 6.6, "z_score": 1.4,
+        },
+        "gdd": {"pct_anomaly": 12.3, "z_score": 1.5},
+        "season_precipitation": {"pct_anomaly": -20.0, "z_score": -0.8},
+        "pre_harvest_precipitation": {"pct_anomaly": None, "z_score": None},
+        "harvest_proxy_window_start": "2019-10-02",
+        "harvest_proxy_window_end": "2019-10-31",
+    }
+    context = report._build_climate_context(anomaly)
+
+    assert "19.4" not in context
+    assert "18.2" not in context
+    assert "°C" not in context
+
+
 def test_build_climate_context有資料時帶出具體距平數字() -> None:
     anomaly = {
         "summary": "Bordeaux（波爾多）2019 GDD 比 30 年平均高 12%。",
@@ -239,7 +265,7 @@ def test_generate_report組出markdown並附加決定式的資料來源段(monke
     monkeypatch.setattr(report, "_get_client", lambda: object())
     monkeypatch.setattr(report, "_generate_structured_body", lambda client, message, known_ids: fake_body)
 
-    markdown = report.generate_report(
+    sections = report.generate_report(
         region_canonical="Bordeaux",
         region_zh="波爾多",
         vintage_year=2019,
@@ -247,6 +273,10 @@ def test_generate_report組出markdown並附加決定式的資料來源段(monke
         knowledge_hits=[_make_hit("rule_warm_dry_01")],
     )
 
+    assert "偏暖偏乾的年份糖度可能較高。" in sections.flavor
+    assert "rule_warm_dry_01" in sections.sources
+    # CLI 仍然要拿得到四段式全文，段落標題與改版前一致。
+    markdown = sections.to_markdown()
     assert "## 風味推測" in markdown
     assert "## 資料來源" in markdown
     assert "rule_warm_dry_01" in markdown.split("## 資料來源")[1]
@@ -259,13 +289,12 @@ def test_generate_report過濾模型編造的引用不讓假id出現在資料來
     monkeypatch.setattr(report, "_get_client", lambda: object())
     monkeypatch.setattr(report, "_generate_structured_body", lambda client, message, known_ids: fake_body)
 
-    markdown = report.generate_report(
+    sections = report.generate_report(
         region_canonical="Bordeaux", region_zh="波爾多", vintage_year=2019,
         anomaly=None, knowledge_hits=[_make_hit("rule_warm_dry_01")],
     )
 
-    sources_section = markdown.split("## 資料來源")[1]
-    assert "fake_id_not_real" not in sources_section
+    assert "fake_id_not_real" not in sections.sources
 
 
 def test_generate_report沒有api_key時拋出ReportGenerationError(monkeypatch: pytest.MonkeyPatch) -> None:

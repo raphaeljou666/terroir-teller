@@ -23,7 +23,6 @@ from plotly.subplots import make_subplots
 
 import agent
 from src import climate, vision
-from src.report import MOUNTAIN_RAINFALL_BIAS_REGIONS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,6 +39,27 @@ MIN_VINTAGE_YEAR = 1940
 ABOVE_COLOR = {"light": "#eb6834", "dark": "#d95926"}
 BELOW_COLOR = {"light": "#2a78d6", "dark": "#3987e5"}
 ZERO_LINE_COLOR = {"light": "#8a8a85", "dark": "#6f6f6a"}
+
+# 氣候比對表的三列：`(距平 payload 的欄位名, 顯示名稱, 數值格式, 差異欄的算法)`。
+#
+# 生長季均溫排第一列是刻意的——它是三個指標裡唯一有生活經驗錨點的數字，看到 19.4°C 就
+# 知道那是什麼感覺。GDD 的 1580 沒有這種錨點，靠的是同一列的 30 年平均當對照：並列比較
+# 本身就是錨點，讀者不必先理解積溫的定義，也看得出這年比平常多還是少。
+COMPARISON_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("season_mean_temp", "生長季均溫", "{:.1f}°C", "absolute"),
+    ("gdd", "熱量累積（GDD）", "{:,.0f}", "percent"),
+    ("season_precipitation", "生長季降雨", "{:,.0f} mm", "percent"),
+)
+
+# 列名用「熱量累積」而不是「生長積溫」：後者本身也是術語，前者不用查就懂。GDD 原文依
+# 條款 3 保留在括號裡。
+GDD_EXPLANATION = (
+    "GDD（生長積溫）是把生長季每天超過 10°C 的部分逐日累加，數字越大，代表那一年葡萄"
+    "成熟時可用的熱量越多。單獨看這個數字沒什麼意義，跟 30 年平均擺在一起才讀得出多寡。"
+)
+
+UNAVAILABLE_CELL = "—"
+UNCOMPUTABLE_DELTA = "無法計算"
 
 
 def _init_session_state() -> None:
@@ -189,11 +209,21 @@ def run_analysis(values: dict[str, Any]) -> None:
     Agent loop 背後是多次 tool call 加上報告生成，10 秒以上很常見，一個不透明的 spinner
     在手機網路下尤其讓人不安；用 `on_progress` 回呼把每個階段的白話標籤即時更新到畫面上
     （T-18）。
+
+    每則進度訊息除了更新 status 的標籤，也 `write()` 進容器裡（T-24）。原本只更新標籤，
+    容器內從頭到尾是空的，`expanded=True` 於是在分析結束後留下一個標題寫著「分析完成」、
+    打開卻什麼都沒有的空框——報告在容器外面另外渲染，看起來就像內容跑到別的地方去了。
+    現在收合起來當一行狀態列，展開則看得到實際走過哪幾步。
     """
     region = values["region"].strip()
     year = int(values["vintage"])
     logger.info("呼叫 agent.analyze()：region=%r, year=%r", region, year)
-    with st.status("正在分析氣候與風味資料……", expanded=True) as status:
+    with st.status("正在分析氣候與風味資料……", expanded=False) as status:
+
+        def _report_progress(message: str) -> None:
+            status.update(label=message)
+            status.write(message)
+
         st.session_state.result = agent.analyze(
             region=region,
             year=year,
@@ -201,50 +231,94 @@ def run_analysis(values: dict[str, Any]) -> None:
                 "winery": (values.get("winery") or "").strip() or None,
                 "grape": (values.get("grape") or "").strip() or None,
             },
-            on_progress=lambda message: status.update(label=message),
+            on_progress=_report_progress,
         )
-        status.update(label="分析完成", state="complete")
+        status.update(label="分析完成", state="complete", expanded=False)
 
 
-def render_anomaly_metrics(anomaly: dict[str, Any] | None) -> None:
-    """報告最上方的兩張距平卡片：生長積溫（GDD）與生長季降雨，各自的絕對值＋距平百分比。
+def _format_cell(value: float | None, template: str) -> str:
+    """把單一數值格式化成表格內容，取不到值時顯示破折號而不是 0（條款 15）。"""
+    return UNAVAILABLE_CELL if value is None else template.format(value)
 
-    `pct_anomaly` 在基準線標準差為 0 時會是 `None`（`st.metric` 的 `delta` 支援 `None`，
-    此時卡片仍會顯示原始數值、只是不畫上下箭頭，不會捏造一個假的百分比，條款 15）。
+
+def _format_difference(metric: dict[str, Any], delta_kind: str) -> str:
+    """算出「差異」欄的文字：溫度用絕對差、其餘用百分比距平。
+
+    溫度不用百分比是有理由的：攝氏是等距尺度而不是比例尺度，沒有絕對零點，「均溫比平均
+    高 6%」在氣候學上不成立。GDD 與降雨都有絕對零點，百分比才讀得通。
     """
+    if delta_kind == "absolute":
+        vintage, baseline = metric.get("vintage_value"), metric.get("baseline_mean")
+        if vintage is None or baseline is None:
+            return UNCOMPUTABLE_DELTA
+        return f"{vintage - baseline:+.1f}°C"
+
+    pct = metric.get("pct_anomaly")
+    return UNCOMPUTABLE_DELTA if pct is None else f"{pct:+.1f}%"
+
+
+def _build_comparison_table(
+    anomaly: dict[str, Any], vintage_year: int | None
+) -> pd.DataFrame:
+    """組出「採收年 vs 30 年平均」的氣候比對表（T-24）。"""
+    year_column = f"{vintage_year} 年" if vintage_year else "採收年"
+    rows = []
+    for payload_key, label, template, delta_kind in COMPARISON_ROWS:
+        metric = anomaly.get(payload_key) or {}
+        rows.append({
+            "指標": label,
+            year_column: _format_cell(metric.get("vintage_value"), template),
+            "30 年平均": _format_cell(metric.get("baseline_mean"), template),
+            "差異": _format_difference(metric, delta_kind),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_climate_comparison(anomaly: dict[str, Any] | None, vintage_year: int | None) -> None:
+    """畫氣候比對表與 GDD 的白話說明（T-24、US-4.3）。"""
     if not anomaly:
+        st.caption("這個年份的氣候比對資料暫時無法取得，不影響上面的風味推測。")
         return
 
-    gdd = anomaly.get("gdd", {})
-    rain = anomaly.get("season_precipitation", {})
-
-    col1, col2 = st.columns(2)
-    with col1:
-        pct = gdd.get("pct_anomaly")
-        st.metric(
-            "生長積溫（GDD）", f"{gdd.get('vintage_value', 0):.0f}",
-            delta=f"{pct:+.1f}%" if pct is not None else None,
-        )
-    with col2:
-        pct = rain.get("pct_anomaly")
-        st.metric(
-            "生長季降雨量（mm）", f"{rain.get('vintage_value', 0):.0f}",
-            delta=f"{pct:+.1f}%" if pct is not None else None,
-        )
+    st.dataframe(
+        _build_comparison_table(anomaly, vintage_year), hide_index=True, width="stretch"
+    )
+    st.caption(GDD_EXPLANATION)
 
 
 def render_report(result: agent.AnalysisResult) -> None:
-    """依 `result.status` 分支渲染：成功顯示報告＋圖表，其餘顯示白話說明（US-4.1）。"""
-    if result.status != "ok" or result.markdown is None:
+    """依 `result.status` 分支渲染：成功顯示報告，其餘顯示白話說明（US-4.1）。
+
+    分三層擺，愈往下愈細（T-24）：
+
+    1. **風味推測**不收合。使用者走完整段流程要的就是這個結論，讓他多點一下才看得到，
+       等於把答案藏在自己的介面後面。
+    2. **影響原因**收合。氣候比對表與氣候摘要是「為什麼會這樣推測」的依據，想追根據的人
+       點開就有，不想追的人不必先捲過三行數字才讀到結論。
+    3. **說明與資料來源**收合。限制說明、逐月距平圖、引用清單這些是可追溯性的材料
+       （條款 17），一定要在，但不該跟結論搶版面。
+
+    風味推測段落句尾的 `[chunk_id]` 標記對應到第三塊的引用清單，收合不影響可追溯性——
+    標記本身仍然看得見，展開就對得到來源。
+    """
+    if result.status != "ok" or result.sections is None:
         st.warning(result.user_message)
         return
 
-    render_anomaly_metrics(result.gathered.anomaly)
-    body, _, sources = result.markdown.partition("## 資料來源")
-    st.markdown(body)
-    render_charts(result.gathered)
-    with st.expander("資料來源", expanded=True):
-        st.markdown(sources or "本次報告未能引用任何具體知識庫片段或氣候資料。")
+    sections = result.sections
+    st.subheader("風味推測")
+    st.markdown(sections.flavor)
+
+    with st.expander("影響原因"):
+        render_climate_comparison(result.gathered.anomaly, result.gathered.vintage_year)
+        st.markdown(sections.climate_summary)
+
+    with st.expander("說明與資料來源"):
+        st.markdown("#### 限制說明")
+        st.markdown(sections.limitations)
+        render_charts(result.gathered)
+        st.markdown("#### 資料來源")
+        st.markdown(sections.sources or "本次報告未能引用任何具體知識庫片段或氣候資料。")
 
 
 @st.cache_data(show_spinner=False)
@@ -324,7 +398,15 @@ def _build_anomaly_chart(
 
 
 def render_charts(gathered: agent.GatheredData) -> None:
-    """畫逐月氣候距平圖（T-15、US-4.2、T-23 改版），山區產區加 ERA5 高估提醒。"""
+    """畫逐月氣候距平圖（T-15、US-4.2、T-23 改版）。
+
+    T-24 起這張圖被移進「說明與資料來源」收合區，標題也從 `st.subheader` 降級成 `####`
+    ——收合區裡面再放一個跟頁面主標同級的標題會壓過外面的「風味推測」。
+
+    山區產區的 ERA5 降雨高估提醒也在同一次改版拿掉了，不是因為那個提醒不重要，而是
+    `report._ensure_limitation_caveats()` 已經確定性地把同一句話寫進限制說明，而限制說明
+    現在就排在這張圖上面幾行。留著會變成同一個區塊裡連講兩次。
+    """
     if not gathered.region_canonical or not gathered.vintage_year:
         return
 
@@ -333,7 +415,7 @@ def render_charts(gathered: agent.GatheredData) -> None:
         st.info("這個產區與年份的氣候距平圖表資料暫時無法取得，不影響上面的風味推測報告。")
         return
 
-    st.subheader("逐月氣候距平")
+    st.markdown("#### 逐月氣候距平")
     year_label = f"{gathered.vintage_year} 年"
 
     # st.context.theme.type 在沒有真實瀏覽器連線時（例如 AppTest、主題切換瞬間）可能是
@@ -347,11 +429,6 @@ def render_charts(gathered: agent.GatheredData) -> None:
         f"每根柱子是{year_label}該月減去 30 年平均的差值。"
         "橘色代表高於平均、藍色代表低於平均，柱子越長差距越大。"
     )
-    if gathered.region_canonical in MOUNTAIN_RAINFALL_BIAS_REGIONS:
-        st.caption(
-            f"{gathered.region_canonical} 地形起伏較大，ERA5 氣候資料在山區容易高估降雨量"
-            "（約為實測值的兩倍），這裡的降雨數字可以保留一定的懷疑空間。"
-        )
 
 
 def main() -> None:
